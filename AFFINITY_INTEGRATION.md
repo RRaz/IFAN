@@ -202,6 +202,11 @@ same size in both. The measured 1884 MiB peak and the ~1.8 GB per megapixel
 whole-image figure apply unchanged. Image size is what costs memory, and tiling
 already handles that.
 
+Host RAM, not GPU memory, is what an image really costs: about 1.2 GiB of runtime
+plus ~56 bytes per pixel, so the 20.9 Mpx frame peaks near 2.3 GiB
+(`LOCAL_SETUP.md` §6). That is what `--max-pixels` guards, and its default follows
+the free memory of whatever machine it is running on rather than a fixed count.
+
 The three traps that shaped the 16-bit path are now handled in `local_infer.py`, and
 are recorded here because they are what the code is defending against:
 

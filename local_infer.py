@@ -23,8 +23,8 @@ So this runner never downscales.  Instead it:
   * splits anything larger than one tile into overlapping tiles, runs the
     network tile by tile, and feathers the results back together, so peak GPU
     memory depends on --tile rather than on the size of the image, and
-  * refuses images above a pixel ceiling with a message that names the limit,
-    rather than quietly shrinking them.
+  * refuses images above a pixel ceiling that follows the machine's own memory,
+    with a message that names the limit, rather than quietly shrinking them.
 
 Bit depth follows the file: a 16-bit TIFF is read, deblurred and written at 16 bits
 with no arguments, an 8-bit JPEG stays 8-bit, and a folder holding both gets the right
@@ -38,6 +38,7 @@ only; every one of them has a working default.
 """
 
 import argparse
+import ctypes
 import os
 import sys
 import time
@@ -54,7 +55,8 @@ from models.archs.IFAN import Network
 DEFAULT_MAX_SIDE = 0               # 0 = never downscale (upstream capped at 1920)
 DEFAULT_TILE = 1024                # largest tile side; 0 disables tiling
 DEFAULT_OVERLAP = 256              # feather width between neighbouring tiles
-DEFAULT_MAX_PIXELS = 100_000_000   # ceiling, refused with a message naming the limit
+DEFAULT_MAX_PIXELS = 100_000_000   # only for a machine that will not say how much memory
+                                   # it has; see `pixel_ceiling`
 DEFAULT_DEST = 'both'              # 'output', 'subfolder', 'suffix' or 'both'
 DEFAULT_SUBFOLDER = 'deblurred'    # folder created beside the inputs
 DEFAULT_SUFFIX = '_db'             # appended to each output file name
@@ -122,6 +124,72 @@ def is_within(path, folder):
         return os.path.commonpath([path, folder]) == folder
     except ValueError:      # different drives on Windows
         return False
+
+
+# What one deblur costs the machine, measured rather than guessed (LOCAL_SETUP.md §6):
+# fitted over five sizes from 1 to 21 megapixels, it is linear to within half a percent at
+# BYTES_PER_PIXEL per pixel plus RUNTIME_RAM.  It is the same at 8 and 16 bits.  Small as
+# those bytes look, the whole image is resident several times over at the worst moment --
+# upstream's read hands the frame back as float64 and the tile accumulator is float32 --
+# which is why the ceiling below is a memory guard rather than an arbitrary count.
+BYTES_PER_PIXEL = 56
+RUNTIME_RAM = 1.2 * 1024 ** 3      # interpreter, torch, OpenCV and the CUDA context
+MEMORY_SHARE = 0.5                 # of what is free; the rest of the machine keeps working
+
+
+def memory_reading():
+    """`(free, total)` physical memory in bytes, or None if the machine will not say.
+
+    psutil answers if it happens to be installed, otherwise the platform is asked
+    directly, so that running this needs nothing added to the environment.
+    """
+    try:
+        import psutil
+        memory = psutil.virtual_memory()
+        return int(memory.available), int(memory.total)
+    except Exception:       # not installed, or it could not work out the answer
+        pass
+
+    if sys.platform == 'win32':
+        class MEMORYSTATUSEX(ctypes.Structure):
+            _fields_ = [('dwLength', ctypes.c_ulong), ('dwMemoryLoad', ctypes.c_ulong),
+                        ('ullTotalPhys', ctypes.c_ulonglong),
+                        ('ullAvailPhys', ctypes.c_ulonglong),
+                        ('ullTotalPageFile', ctypes.c_ulonglong),
+                        ('ullAvailPageFile', ctypes.c_ulonglong),
+                        ('ullTotalVirtual', ctypes.c_ulonglong),
+                        ('ullAvailVirtual', ctypes.c_ulonglong),
+                        ('ullAvailExtendedVirtual', ctypes.c_ulonglong)]
+        status = MEMORYSTATUSEX()
+        status.dwLength = ctypes.sizeof(status)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return int(status.ullAvailPhys), int(status.ullTotalPhys)
+        return None
+
+    try:
+        page = os.sysconf('SC_PAGE_SIZE')
+        return page * os.sysconf('SC_AVPHYS_PAGES'), page * os.sysconf('SC_PHYS_PAGES')
+    except (AttributeError, ValueError, OSError):
+        return None
+
+
+def image_ram(pixels):
+    """Bytes of host RAM a `pixels` image takes, by the arithmetic the ceiling uses."""
+    return RUNTIME_RAM + pixels * BYTES_PER_PIXEL
+
+
+def pixel_ceiling():
+    """The largest image this machine should be asked to hold, in pixels, or None.
+
+    The ceiling guards host RAM, so it belongs to the machine rather than to this file:
+    what a 32 GB workstation holds will not fit on a laptop.  None means the machine would
+    not say, leaving the caller to fall back on the constant above.
+    """
+    reading = memory_reading()
+    if not reading:
+        return None
+    free, _total = reading
+    return max(1_000_000, int((free * MEMORY_SHARE - RUNTIME_RAM) / BYTES_PER_PIXEL))
 
 
 def load_network(ckpt_path, config, device):
@@ -493,13 +561,16 @@ def process(runner, device, path, output_path, max_side, tile, overlap, max_pixe
             cv2.resize(frame[0], dsize=scaled, interpolation=cv2.INTER_AREA), 0)
         note = ' downscaled {}x{}->{}x{}'.format(width, height, scaled[0], scaled[1])
 
-    # Past the ceiling we stop rather than quietly produce a smaller picture.
+    # Past the ceiling we stop rather than quietly produce a smaller picture.  Both what
+    # the image wants and what the limit is are named, so the answer to "why this number"
+    # is on screen rather than in a table somewhere.
     pixels = frame.shape[1] * frame.shape[2]
     if max_pixels and pixels > max_pixels:
         raise RuntimeError(
-            '{}x{} = {:.1f} megapixels is over the {:.1f} megapixel limit '
-            '(raise it with --max-pixels if you have the RAM and time)'.format(
-                frame.shape[2], frame.shape[1], pixels / 1e6, max_pixels / 1e6))
+            '{}x{} = {:.1f} megapixels is over the {:.1f} megapixel limit, and would '
+            'want about {:.1f} GiB of RAM; raise the limit with --max-pixels if you '
+            'know better'.format(frame.shape[2], frame.shape[1], pixels / 1e6,
+                                 max_pixels / 1e6, image_ram(pixels) / 1024 ** 3))
 
     # The network downsamples by 8, so trim to a multiple of config.refine_val.
     image = refine_image(frame, config.refine_val)[0]
@@ -557,9 +628,10 @@ def main():
     parser.add_argument('--max-side', type=int, default=DEFAULT_MAX_SIDE,
                         help='downscale inputs whose longest side exceeds this many pixels; '
                              '0 (the default) never downscales')
-    parser.add_argument('--max-pixels', type=int, default=DEFAULT_MAX_PIXELS,
+    parser.add_argument('--max-pixels', type=int, default=None,
                         help='refuse images above this many pixels instead of shrinking them; '
-                             '0 removes the ceiling (default: %(default)s)')
+                             'the default is what this machine has the memory for, and '
+                             '0 removes the ceiling')
     parser.add_argument('--tile', type=int, default=DEFAULT_TILE,
                         help='largest tile side when processing large images; '
                              '0 disables tiling and needs memory proportional to the image '
@@ -596,15 +668,36 @@ def main():
         print('note       : tile rounded down to {} (multiple of {})'.format(tile, REFINE_VAL))
     overlap = args.overlap - args.overlap % REFINE_VAL
 
+    # The ceiling guards host RAM, so it is worked out from the machine at hand rather than
+    # fixed in this file: the number that suits a 32 GB workstation does not suit a laptop,
+    # and whoever is at a different machine needs to be able to see where it came from.
+    # --max-pixels settles it either way.
+    if args.max_pixels is None:
+        ceiling = pixel_ceiling()
+        if ceiling is None:
+            args.max_pixels = DEFAULT_MAX_PIXELS
+            limit_note = ' (default: this machine would not say how much memory it has)'
+        else:
+            args.max_pixels = ceiling
+            limit_note = ' (about half of what is free, at ~{} bytes per pixel)'.format(
+                BYTES_PER_PIXEL)
+    else:
+        limit_note = ' (as asked)'
+
     print('device     : {}{}'.format(device, '' if device.type == 'cpu' else
                                      ' ({})'.format(torch.cuda.get_device_name(0))))
     print('model      : {}'.format(args.config if args.config != DEFAULT_CONFIG else
                                    'auto, each file at its own bit depth'))
+    reading = memory_reading()
+    if reading:
+        print('memory     : {:.1f} GiB free of {:.1f} GiB'.format(
+            reading[0] / 1024 ** 3, reading[1] / 1024 ** 3))
     print('max side   : {}'.format('unlimited' if not args.max_side else args.max_side))
     print('tiling     : {}'.format('disabled' if tile <= 0 else
                                    '{} px tiles, {} px overlap'.format(tile, overlap)))
-    print('pixel limit: {}'.format('none' if not args.max_pixels else
-                                   '{:.0f} megapixels'.format(args.max_pixels / 1e6)))
+    print('pixel limit: {}{}'.format('none' if not args.max_pixels else
+                                     '{:.0f} megapixels'.format(args.max_pixels / 1e6),
+                                     limit_note))
 
     # Configurations are loaded on demand, one per bit depth actually encountered, so all
     # that can be checked here is that there is a checkpoint to load at all.

@@ -26,8 +26,10 @@ than they went in*.
   tiles and feathered back together, so peak GPU memory stays near 1.9 GB regardless
   of input size, instead of the ~1.8 GB *per megapixel* a whole-image pass needs
   (a 22 Mpx image needs a 19.6 GiB allocation and fails outright on a 12 GB card).
-- **Stops at a ceiling rather than shrinking.** An image over 100 megapixels is
-  refused with a message naming the limit, instead of quietly coming back smaller.
+- **Stops at a ceiling rather than shrinking.** An image past the memory the machine
+  has free is refused with a message naming the limit and what the image would have
+  wanted, instead of quietly coming back smaller. The ceiling is worked out per
+  machine, not fixed at a number that suits one.
 - **Batches folders of images.** The checkpoint loads once and every image in a tree
   is processed; a per-image failure is reported without stopping the run.
 - **Results stay with the sources,** in a `deblurred/` subfolder and with a `_db`

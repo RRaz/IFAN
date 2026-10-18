@@ -51,17 +51,19 @@ IFAN's filter predictor (`models/archs/IFAN.py`, `self.F`) emits a
 2. **Tiles automatically.** Anything larger than `--tile` (1024 px by default) is
    split into overlapping tiles and feathered back together, so peak GPU memory
    stays flat at ~1.9 GB however big the input is (§6).
-3. **Stops at a ceiling instead of shrinking.** An image over **100 megapixels** is
-   refused with a message that names the limit, rather than silently coming back
-   smaller:
+3. **Stops at a ceiling instead of shrinking.** An image past the ceiling is refused
+   with a message that names both the limit and what the image would have wanted,
+   rather than silently coming back smaller:
 
    ```
-   [  1/3] FAILED big.jpg: 3000x2000 = 6.0 megapixels is over the 1.0 megapixel limit
-                           (raise it with --max-pixels if you have the RAM and time)
+   [  2/2] FAILED input_large.jpg: 4532x4578 = 20.7 megapixels is over the 2.0 megapixel
+           limit, and would want about 2.3 GiB of RAM; raise the limit with --max-pixels
+           if you know better
    ```
 
-   The ceiling exists only to stop a runaway job that would exhaust host RAM, and
-   it is far above any ordinary photo. Change it with `--max-pixels`, or pass
+   The ceiling exists only to stop a job that would exhaust host RAM, and it is
+   worked out from the memory the machine has free rather than fixed at a number
+   that suits one particular computer (§6). Change it with `--max-pixels`, or pass
    `--max-pixels 0` for no ceiling at all.
 
 A batch keeps going when one image is refused — the others are still processed (§5.5).
@@ -199,7 +201,7 @@ a destination is named.
 | `--output`, `-o` | `<project>\output` | Destination root for `--dest output`; naming it implies `--dest output` |
 | `--ckpt` | per bit depth | Checkpoint to load; by default the matching one, falling back to `ckpt\IFAN.pytorch` when it is absent |
 | `--max-side` | `0` | Downscale inputs whose longest side exceeds this. **`0` = never downscale** |
-| `--max-pixels` | `100000000` | Refuse images above this many pixels rather than shrinking them. **`0` = no ceiling** |
+| `--max-pixels` | *this machine* | Refuse images above this many pixels rather than shrinking them. The default is derived from the memory free on the machine running it (§6); **`0` = no ceiling** |
 | `--tile` | `1024` | Largest tile side. **`0` disables tiling** (memory then scales with the image) |
 | `--overlap` | `256` | Feather width between neighbouring tiles |
 | `--recursive`, `-r` | off | Recurse into subfolders, preserving the folder structure |
@@ -365,7 +367,7 @@ it down is what throws the detail away.
 
 ---
 
-## 6. How tiling works
+## 6. How tiling works, and what it costs
 
 1. The image is split into tiles of `--tile` px, stepping by `tile - overlap`.
 2. Tile origins are kept multiples of 8 so features line up across tiles, and the
@@ -391,6 +393,47 @@ Tuning: smaller `--tile` means less memory, more seams and slower runs. Peak
 memory scales roughly with the square of the tile size, so halving `--tile` to
 512 reduces memory to about a quarter of the measured 1884 MiB.
 
+### Host RAM is the other constraint, and it scales with the image
+
+Tiling keeps **GPU** memory flat, but the whole picture still sits in host RAM: the
+tile results are accumulated in full size and blended at the end. Measured by reading
+the process's own peak working set, over five sizes of one 16-bit frame:
+
+| Image | Peak host RAM |
+|---|---|
+| 1.0 Mpx (1024x1024) | 1233 MiB |
+| 4.2 Mpx (2048x2048) | 1386 MiB |
+| 9.4 Mpx (3072x3072) | 1666 MiB |
+| 16.8 Mpx (4096x4096) | 2058 MiB |
+| 20.9 Mpx (4571x4578, the full frame) | 2277 MiB |
+
+That is a straight line — **~56 bytes per pixel, plus ~1.2 GiB** for the interpreter,
+torch, OpenCV and the CUDA context. The fit is within half a percent at every point,
+and 8-bit costs the same as 16-bit: at 4096x4096 the same picture measured 2067 MiB
+at 8 bits against 2058 MiB at 16. Nothing about the cost depends on the bit depth.
+
+Those 56 bytes are larger than they look because the image is resident several times
+over at the worst moment — upstream's `read_frame` returns the frame as **float64**
+(24 bytes per pixel across three channels), the tile accumulator is float32 (12) with
+its weight map (4), and the final blend needs another array while dividing (16).
+
+This is what `--max-pixels` guards, and why its default is not a constant. A run
+spends **half of the free memory** at those 56 bytes per pixel, and says so on the
+`memory` and `pixel limit` lines:
+
+| Free memory when started | Ceiling | What that covers |
+|---|---|---|
+| 4 GiB | ~15 Mpx | a 12 Mpx camera frame |
+| 8 GiB | ~54 Mpx | a 45 Mpx camera frame |
+| 16 GiB | ~130 Mpx | a 100 Mpx scan |
+| 32 GiB | ~285 Mpx | more than you are likely to hand it |
+
+`--max-pixels` overrides either way — lower it on a machine that is busy with other
+work, or raise it for one big run — and `0` removes the ceiling altogether. The
+arithmetic is printed with the limit so that the number can be checked rather than
+trusted: `memory_reading()` reads the machine directly (psutil if it is installed,
+otherwise the OS), and `pixel_ceiling()` applies the two constants above.
+
 ---
 
 ## 7. Verifying
@@ -406,9 +449,10 @@ run_infer.bat demo\input\input_large.jpg
 ```
 device     : cuda (NVIDIA GeForce RTX 3060)
 model      : auto, each file at its own bit depth
+memory     : 18.9 GiB free of 31.1 GiB
 max side   : unlimited
 tiling     : 1024 px tiles, 256 px overlap
-pixel limit: 100 megapixels
+pixel limit: 158 megapixels (about half of what is free, at ~56 bytes per pixel)
 images     : 1 found under demo\input\input_large.jpg
 destination: demo\input\deblurred as <name>_db<ext>
 [  1/1] input_large.jpg  4532x4578 -> 4528x4576  8-bit [36 tiles]  7.28s peak GPU 1884 MiB
@@ -422,18 +466,23 @@ Two things to check:
 - `peak GPU` stays near ~1900 MiB even as the image grows, and `[N tiles]` is
   reported — so **tiling is engaging**. A climb into the thousands means it is not,
   and the image was processed whole.
+- `memory` and `pixel limit` are read from the machine at hand — the ceiling is half
+  of the free memory at ~56 bytes per pixel (§6) — so **it differs from one computer
+  to the next** without anything having to be set.
 
 The result lands at `demo\input\deblurred\input_large_db.jpg`, beside the original.
 
 To see the ceiling work, push it down and run any ordinary photo:
 
 ```bat
-.venv\Scripts\python.exe local_infer.py -i "D:\photo.jpg" -o out_test --max-pixels 1000000
+.venv\Scripts\python.exe local_infer.py -i "D:\photo.jpg" -o out_test --max-pixels 2000000
 ```
 
 ```
-[  1/1] FAILED photo.jpg: 3000x2000 = 6.0 megapixels is over the 1.0 megapixel limit
-                          (raise it with --max-pixels if you have the RAM and time)
+pixel limit: 2 megapixels (as asked)
+[  1/1] FAILED photo.jpg: 3000x2000 = 6.0 megapixels is over the 2.0 megapixel limit, and
+                          would want about 1.5 GiB of RAM; raise the limit with
+                          --max-pixels if you know better
 Done: 0 of 1 image(s) in 0.0s, 1 failed
 ```
 
@@ -451,7 +500,7 @@ for the same image, because both normalise to the same values in [0, 1]. Anythin
 means the read or write scaling is wrong. Including an alpha channel in that test file
 must not change the result by a single byte.
 
-Two things are worth re-checking whenever `local_infer.py` changes:
+Three things are worth re-checking whenever `local_infer.py` changes:
 
 - **The 8-bit path is byte-identical.** Its output is what upstream users already had, so
   it is compared as a file rather than by eye. Run the same 8-bit image through the
@@ -463,6 +512,11 @@ Two things are worth re-checking whenever `local_infer.py` changes:
   report `8-bit` on one line and `16-bit` on the other, loading `ckpt\IFAN.pytorch` for the
   first and `ckpt\IFAN_16bit.pytorch` for the second, and leaving a `uint8` and a `uint16`
   file on disk.
+- **The ceiling follows the machine.** `python -c "import local_infer as li;
+  print(li.pixel_ceiling())"` must agree with the `pixel limit` line of a run, and be
+  about *half the free memory* divided by 56 bytes per pixel. With nothing to read —
+  `li.memory_reading = lambda: None` set before `main()` is called — that line must fall
+  back to `100 megapixels` and say why, rather than leaving the number unexplained.
 
 ---
 
@@ -473,9 +527,11 @@ Tiling is not engaging, or `--tile 0` was passed. Lower `--tile` (e.g. `512`).
 Tiled runs need ~1.9 GB regardless of input size.
 
 **`... is over the N megapixel limit`**
-Not the network failing — it is the guard from §2. Either shrink the image, raise
-the ceiling (`--max-pixels 200000000`), or remove it (`--max-pixels 0`). Each extra
-100 megapixels needs roughly 2 GB of host RAM and about 40 s on an RTX 3060.
+Not the network failing — it is the guard from §2, and it is about host RAM, not the
+GPU. The number is half of the memory that was free when the run started, at ~56 bytes
+per pixel (§6). Either close something else and run again (the ceiling follows what is
+free), raise the limit (`--max-pixels 200000000`), or remove it (`--max-pixels 0`).
+Each 100 megapixels wants about 5.6 GiB of RAM and about 40 s on an RTX 3060.
 
 **`No checkpoint found in ...\ckpt`**
 Neither `IFAN.pytorch` nor `IFAN_16bit.pytorch` is present — see §4.2. A

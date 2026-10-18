@@ -39,7 +39,7 @@ rem      --subfolder sharp       rename the subfolder
 rem      --suffix _sharp         change the suffix
 rem      --tile 512              smaller tiles, less GPU memory
 rem      --overlap 384           wider feather between tiles
-rem      --max-pixels 200000000  raise the ceiling
+rem      --max-pixels 200000000  set the ceiling by hand (default: this machine's own)
 rem      --ext png               write PNG instead of keeping the input format
 rem
 rem  This wrapper always processes subfolders.  For everything else run
