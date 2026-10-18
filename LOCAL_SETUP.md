@@ -87,6 +87,7 @@ Installed versions:
 | opencv-python | 5.0.0.93 |
 | easydict | 1.13 |
 | pillow | 13.0.0 |
+| rawpy | 0.27.1 (libraw 0.22.1) — optional; not used by the runner, see §8 |
 
 ---
 
@@ -440,6 +441,18 @@ in `predict.py` for anyone deploying through Cog.
 `eval.py`, so this only matters if you run the upstream evaluation path, which
 additionally needs `scikit-image`, `scikit-learn`, `scipy`, `tensorboardX`,
 `ptflops` and `torch-optimizer`.
+
+**`A DNG is ignored, or does not match the same picture as a TIFF`**
+`.dng` is deliberately absent from the extensions a folder scan collects, so a batch over
+a photo folder will not touch raw files at all — a run that seems to prove something
+about DNG has probably never opened one. Name it directly (`-i photo.dng`) to try it. Even
+then OpenCV sees only the TIFF container: the colour matrix, white balance and
+linearisation that make a DNG a DNG are skipped, and the runner says so on the console. A
+camera raw usually arrives as a single-channel colour-filter array rather than a picture,
+which it also warns about. A DNG can be read but not written, so the result needs
+`--ext tif` (or `png`); `--ext keep` is refused. For a correct read `rawpy` (libraw) is
+installed in `.venv`, but for anything going into the deblurring pipeline, export a
+demosaiced TIFF or PNG instead.
 
 **Input is very small**
 Images under 8 px after trimming are rejected, since the network needs at least

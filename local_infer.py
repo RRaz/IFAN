@@ -268,6 +268,9 @@ def read_input(path, config):
     drops an alpha channel first: upstream reverses the last axis, which would turn a
     four-channel BGRA image into ARGB and quietly corrupt it, and Affinity TIFF
     exports commonly carry alpha.
+
+    A DNG is read as a bare TIFF, since that is all OpenCV sees.  It says so rather
+    than pretending: everything that makes a DNG a DNG is skipped.
     """
     if getattr(config, 'in_bit', 8) != 16:
         return read_frame(path, config.norm_val, None)
@@ -281,9 +284,17 @@ def read_input(path, config):
             '65535 would bring it back almost black; use --config config_IFAN for '
             '8-bit files'.format(path, raw.dtype.itemsize * 8))
 
+    if os.path.splitext(path)[1].lower() == '.dng':
+        print('WARNING    : {} is a DNG, read here as a bare TIFF: its colour matrix, '
+              'white balance and linearisation are skipped, so it will not match the '
+              'same picture exported as TIFF or PNG'.format(os.path.basename(path)))
+
     if raw.ndim == 3 and raw.shape[2] == 4:
         raw = raw[:, :, :3]                        # drop alpha before reversing
     if raw.ndim == 2:
+        print('WARNING    : {} is single-channel, so it is treated as greyscale; if this '
+              'is a raw file it is a colour-filter array (a mosaic) and the result is '
+              'meaningless'.format(os.path.basename(path)))
         raw = cv2.cvtColor(raw, cv2.COLOR_GRAY2RGB)
     else:
         raw = raw[:, :, ::-1]                      # BGR -> RGB
@@ -458,6 +469,14 @@ def main():
                   .format(skipped, args.input))
             return
         sys.exit('No images found under {}'.format(args.input))
+
+    # A DNG can be read here but not written, so it can never keep its own extension.
+    if args.ext == 'keep':
+        raws = [p for p in images if os.path.splitext(p)[1].lower() == '.dng']
+        if raws:
+            sys.exit('DNG cannot be written back out, only read; add --ext tif (or png) '
+                     'to choose a container for the result ({}).'
+                     .format(os.path.basename(raws[0])))
 
     # 16-bit results need a container that can hold them; JPEG and WebP cannot.
     if getattr(config, 'in_bit', 8) > 8:
