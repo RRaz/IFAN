@@ -89,8 +89,9 @@ arguments at all; `--config` remains as an override for forcing one mode, `IFAN_
 the mode behind it, and the traps listed further down are guarded. Verified against the
 8-bit result: a 16-bit file built by scaling an
 8-bit image by exactly 257 yields a 16-bit result that divides back by 257 to a
-**byte-identical** picture, and the same file carrying an alpha channel gives
-byte-identical output as well.
+**byte-identical** picture. An alpha channel, where the file has one, is now carried
+through to the result **unchanged**: adding an alpha to that same test file leaves the
+colour byte for byte what it was without one, with the alpha put back on the result.
 
 How it works, for reference:
 
@@ -104,8 +105,9 @@ How it works, for reference:
 - `local_infer.py` now selects the config by name, mapping each `--config` value to
   that config's own `get_config` and mode. The 8-bit path still calls `read_frame`
   unchanged, and its output is byte-for-byte what it was before the change.
-- The 16-bit path reads with `IMREAD_UNCHANGED` itself, so that it can drop an alpha
-  channel before the channel reversal — see the traps below.
+- The 16-bit path reads with `IMREAD_UNCHANGED` itself, so that it can lift an alpha
+  channel off before the channel reversal and put it back on the result afterwards — see
+  the traps below.
 - The write is one line: scale by `2 ** in_bit - 1`, cast to `uint16` for the 16-bit
   config and `uint8` otherwise. Same code, different divisor.
 - `--ext` gained `tif` alongside `keep`, `png` and `jpg`.
@@ -213,8 +215,10 @@ are recorded here because they are what the code is defending against:
 - **Alpha breaks the 16-bit read.** `cv2.imread(path, -1)` (`IMREAD_UNCHANGED`)
   returns the file as stored, so a 16-bit image carrying an alpha channel arrives as
   4 channels and `read_frame`'s `frame[...,::-1]` then reorders them wrongly. The
-  16-bit path drops alpha before the reversal instead, which is testable: the same
-  image with and without alpha now produces byte-identical output.
+  16-bit path now lifts alpha off before the reversal and puts it back on the result
+  unchanged, which is testable: adding an alpha to a test image leaves the colour
+  byte-identical to the run without one, and the alpha returns byte for byte — the
+  8-bit read takes alpha the same way, from the probe it already made.
 - Model and config must be switched together — selecting `--config
   config_IFAN_16bit` switches both, so they cannot drift apart by accident.
 

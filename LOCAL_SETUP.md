@@ -242,9 +242,9 @@ Every image is processed in one pass, one at a time:
 
 ```
 images     : 3 found under D:\photos
-[  1/3] big.jpg  3000x2000 -> 3000x2000 [12 tiles]  2.51s peak GPU 1884 MiB
-[  2/3] medium.jpg  1200x800 -> 1200x800 [2 tiles]  0.31s peak GPU 1481 MiB
-[  3/3] small.jpg  320x240 -> 320x240  0.02s peak GPU 175 MiB
+[  1/3] big.jpg  3000x2000 -> 3000x2000  8-bit [12 tiles]  2.51s peak GPU 1884 MiB
+[  2/3] medium.jpg  1200x800 -> 1200x800  8-bit [2 tiles]  0.31s peak GPU 1481 MiB
+[  3/3] small.jpg  320x240 -> 320x240  8-bit  0.02s peak GPU 175 MiB
 Done: 3 of 3 image(s) in 2.8s (average 0.95s)
 ```
 
@@ -272,7 +272,7 @@ Done: 3 of 3 image(s) in 2.8s (average 0.95s)
 deblurred and written at 16 bits, an 8-bit JPEG stays 8-bit, and a folder holding both gets
 the right treatment for each — the two models are loaded on demand within the one run. 16
 bits each in red, green and blue is Affinity's 16-bit mode. Each result line names the depth
-it was written at:
+it was written at, and `+alpha` when the result carries an alpha channel:
 
 ```
 [  2/2] IMG_1676_16.tiff  4571x4578 -> 4568x4576  16-bit [36 tiles]  7.22s peak GPU 1924 MiB
@@ -285,7 +285,7 @@ forcing 8-bit output whatever the inputs are:
 .venv\Scripts\python.exe local_infer.py -i D:\photos --config config_IFAN --ext png
 ```
 
-Three things have to line up, and every one of them is checked rather than assumed:
+Four things have to line up, and every one of them is checked rather than assumed:
 
 - **The weights for that depth.** 16-bit input wants `ckpt\IFAN_16bit.pytorch` (§4.2).
   When it is not there the run falls back to the 8-bit checkpoint rather than refusing,
@@ -317,9 +317,14 @@ Three things have to line up, and every one of them is checked rather than assum
   ```
 
 - **Alpha.** Affinity's TIFF exports often carry an alpha channel. `IMREAD_UNCHANGED`
-  returns it as a fourth channel, and upstream's 16-bit read would reorder it into the
-  colour channels and corrupt the picture, so this runner drops alpha first — and says so,
-  because the result then has no transparency of its own.
+  returns it as a fourth channel, and upstream's 16-bit read reverses the last axis, which
+  would reorder it into the colour channels and corrupt the picture, so the runner takes
+  alpha off before that reversal — and puts it back on the result **unchanged**. A plate
+  keeps its own transparency and can be laid straight over whatever the original sat on;
+  the deblurring itself never sees it. Only the container has to allow it, which TIFF and
+  PNG do and JPEG does not, so a JPEG result reports
+  `(alpha dropped: JPEG cannot hold it)` on its line rather than losing it in silence. The
+  line says `+alpha` whenever a result carries one.
 
 **16-bit input and output do not by themselves make the model deblur better.** What they
 buy is the precision to hand the result to a blend — which is the requirement, and is also
@@ -401,12 +406,13 @@ run_infer.bat demo\input\input_large.jpg
 
 ```
 device     : cuda (NVIDIA GeForce RTX 3060)
+model      : auto, each file at its own bit depth
 max side   : unlimited
 tiling     : 1024 px tiles, 256 px overlap
 pixel limit: 100 megapixels
 images     : 1 found under demo\input\input_large.jpg
 destination: demo\input\deblurred as <name>_db<ext>
-[  1/1] input_large.jpg  4532x4578 -> 4528x4576 [36 tiles]  7.28s peak GPU 1884 MiB
+[  1/1] input_large.jpg  4532x4578 -> 4528x4576  8-bit [36 tiles]  7.28s peak GPU 1884 MiB
 Done: 1 of 1 image(s) in 7.3s (average 7.28s)
 ```
 
@@ -443,10 +449,10 @@ The 16-bit path is verified the same way, and needs no options either. Build a 1
 copy of an 8-bit image by scaling every channel by exactly **257** (since 257 × 255 =
 65535): the 16-bit result, divided by 257, must then be **identical** to the 8-bit result
 for the same image, because both normalise to the same values in [0, 1]. Anything else
-means the read or write scaling is wrong. Including an alpha channel in that test file
-must not change the result by a single byte.
+means the read or write scaling is wrong. Adding an alpha channel to that test file must
+leave the colour untouched — the only thing that changes is the channel count.
 
-Two things are worth re-checking whenever `local_infer.py` changes:
+Three things are worth re-checking whenever `local_infer.py` changes:
 
 - **The 8-bit path is byte-identical.** Its output is what upstream users already had, so
   it is compared as a file rather than by eye. Run the same 8-bit image through the
@@ -458,6 +464,10 @@ Two things are worth re-checking whenever `local_infer.py` changes:
   report `8-bit` on one line and `16-bit` on the other, loading `ckpt\IFAN.pytorch` for the
   first and `ckpt\IFAN_16bit.pytorch` for the second, and leaving a `uint8` and a `uint16`
   file on disk.
+- **Alpha rides along.** Put a *pattern* in the alpha — a ramp, not a flat value, or a flip
+  would go unnoticed — and the alpha must come back byte for byte, by the same top-left
+  crop the picture gets. Strip it from the result and the colour must be exactly what the
+  same file without any alpha produced.
 
 ---
 
@@ -515,6 +525,13 @@ have chosen itself. Its depth is probed like any other file, so a 16-bit raw com
 available as an interchange format for this workflow in any case.
 For a correct read `rawpy` (libraw) is installed in `.venv`, but for anything going into
 the deblurring pipeline, export a demosaiced TIFF or PNG instead.
+
+**`... ExtraSamples doesn't match SamplesPerPixel ...` or `Unknown field with tag 51168`**
+Both are warnings from the TIFF reader inside OpenCV, not from this runner, and neither
+changes a pixel. A four-channel TIFF written by OpenCV does not record an `ExtraSamples`
+tag, so the reader works out for itself that the fourth channel is alpha — which is what
+`Defining non-color channels as ExtraSamples` says. Affinity writes tags OpenCV has no name
+for, hence the `51168` one.
 
 **Input is very small**
 Images under 8 px after trimming are rejected, since the network needs at least

@@ -30,6 +30,9 @@ Bit depth follows the file: a 16-bit TIFF is read, deblurred and written at 16 b
 with no arguments, an 8-bit JPEG stays 8-bit, and a folder holding both gets the right
 treatment for each.  --config forces one mode for a whole run when that is wanted.
 
+An alpha channel, where the file has one, rides along unchanged, so a result can be laid
+straight back over whatever the original sat on.
+
 No arguments are needed at all.  The options listed by --help exist for tuning
 only; every one of them has a working default.
 """
@@ -79,13 +82,15 @@ CONFIGS = {
     'config_IFAN':       ('IFAN',       get_config_8bit),
     'config_IFAN_16bit': ('IFAN_16bit', get_config_16bit),
 }
-# Containers that can hold more than 8 bits per channel.  JPEG cannot, which is why
-# 16-bit output cannot simply keep the input extension the way the default does.
+# Containers that can hold more than 8 bits per channel, and an alpha channel with them.
+# JPEG can do neither, which is why 16-bit output cannot keep the input's extension the
+# way the default does.
 DEEP_EXTS = ('.tif', '.tiff', '.png')
-# Extensions that are always 8 bits per channel, so their depth need never be probed.
-# Anything else gets opened and asked -- a DNG included, which can be deep but is absent
-# from IMAGE_EXTS because it cannot be written back out.
-SHALLOW_EXTS = ('.jpg', '.jpeg', '.bmp', '.webp')
+# Extensions that are always 8 bits per channel and never carry alpha, so neither question
+# can be answered without opening the file.  Everything else is opened and asked -- a DNG
+# included, which can be deep and can carry alpha, and is absent from IMAGE_EXTS only
+# because it cannot be written back out.
+PLAIN_EXTS = ('.jpg', '.jpeg')
 # OpenCV gives the TIFF Deflate tag no name; 8 is COMPRESSION_ADOBE_DEFLATE, the widely
 # supported identifier.  Its deprecated twin, 32946, writes the same bytes but makes
 # libtiff warn on every write.
@@ -269,11 +274,11 @@ def deblur_image(net, config, device, image, tile, overlap):
 def input_bit_depth(path):
     """Bits per channel stored in `path`, or None if it cannot be read.
 
-    Formats that cannot hold more than 8 bits are answered from the extension without
-    opening the file; everything else is probed.  `read_input` can also answer this while
-    reading for real, and prefers to.
+    Formats that are always 8 bits and never carry alpha are answered from the extension
+    without opening the file; everything else is probed.  `read_input` can also answer this
+    while reading for real, and prefers to.
     """
-    if os.path.splitext(path)[1].lower() in SHALLOW_EXTS:
+    if os.path.splitext(path)[1].lower() in PLAIN_EXTS:
         return 8
     probe = cv2.imread(path, cv2.IMREAD_UNCHANGED)
     if probe is None:
@@ -367,18 +372,52 @@ class Runner:
         return self._loaded[config_name]
 
 
+def split_alpha(raw):
+    """Return `(colour, alpha)`, separating an alpha channel if the image carries one.
+
+    OpenCV puts alpha last in both layouts it can hand back -- four channels as BGRA and
+    two as grey+alpha -- so it comes off the end either way, and what is left is what
+    upstream's channel reversal expects to see.  No alpha, or no image at all, gives
+    `None` for the alpha.
+    """
+    if raw is None or raw.ndim != 3:
+        return raw, None
+    if raw.shape[2] == 4:
+        return raw[:, :, :3], raw[:, :, 3]
+    if raw.shape[2] == 2:
+        return raw[:, :, 0], raw[:, :, 1]
+    return raw, None
+
+
+def match_alpha(alpha, in_bit):
+    """Put `alpha` into the dtype the result will be written at.
+
+    Only reachable with a mode forced the other way, since the file's own depth and the
+    alpha's always agree.  An 8-bit alpha moves up by 257 per level and back down by
+    rounding, the same arithmetic OpenCV uses on the colour channels.
+    """
+    if alpha is None:
+        return None
+    if in_bit == 16:
+        return alpha.astype(np.uint16) * 257 if alpha.dtype == np.uint8 else alpha
+    if alpha.dtype == np.uint16:
+        return np.round(alpha / 257.0).astype(np.uint8)
+    return alpha
+
+
 def read_input(path, config=None):
-    """Read `path` as (1, h, w, 3) float RGB in [0, 1], with the bits per channel used.
+    """Read `path` as (1, h, w, 3) float RGB in [0, 1], with the bits per channel used and
+    any alpha channel set aside.
 
     With a `config` given, the mode is fixed by it.  With `config=None` the file decides,
-    which is what makes a 16-bit input come back 16-bit without being asked: formats that
-    cannot hold more than 8 bits go straight to upstream's `read_frame`, and anything
-    deeper is read at native depth.
+    which is what makes a 16-bit input come back 16-bit without being asked.
 
-    The 8-bit read is upstream's, untouched.  The 16-bit read is upstream's too, except
-    that it drops an alpha channel first -- upstream reverses the last axis, which would
-    turn a four-channel BGRA image into ARGB and quietly corrupt it, and Affinity TIFF
-    exports commonly carry alpha.
+    Both questions -- how deep the file is, and whether it carries alpha -- are answered by
+    one read, so nothing is opened twice for the same reason.  The 8-bit read itself stays
+    upstream's `read_frame`; the 16-bit read is upstream's too, except that alpha comes off
+    before the channel reversal, because upstream reverses the last axis and would turn a
+    four-channel BGRA image into ARGB and quietly corrupt it.  Either way the alpha is
+    handed back unaltered, to be put on the result.
 
     A DNG is read as a bare TIFF, since that is all OpenCV sees.  It says so rather than
     pretending: everything that makes a DNG a DNG is skipped.
@@ -389,54 +428,51 @@ def read_input(path, config=None):
               'balance and linearisation are skipped, so it will not match the same '
               'picture exported as TIFF or PNG'.format(os.path.basename(path)))
 
-    raw = None
-    if config is None:
-        # The file's own depth decides.  For a format that is always 8 bits this needs no
-        # read at all; otherwise the read below doubles as the probe, so nothing is read
-        # twice.
-        if ext in SHALLOW_EXTS:
-            bits = 8
-        else:
-            raw = cv2.imread(path, cv2.IMREAD_UNCHANGED)
-            if raw is None:
-                raise RuntimeError('could not read {}'.format(path))
-            bits = raw.dtype.itemsize * 8
+    if ext in PLAIN_EXTS:
+        raw, file_bits = None, 8
     else:
-        bits = getattr(config, 'in_bit', 8)
+        raw = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+        if raw is None:
+            raise RuntimeError('could not read {}'.format(path))
+        file_bits = raw.dtype.itemsize * 8
+
+    # What the run reads and writes at: the file's own depth unless a mode was forced.
+    bits = file_bits if config is None else getattr(config, 'in_bit', 8)
+    colour, alpha = split_alpha(raw)
 
     if bits <= 8:
-        return read_frame(path, 255, None), 8
+        return read_frame(path, 255, None), 8, alpha
 
-    if raw is None:
-        raw = cv2.imread(path, cv2.IMREAD_UNCHANGED)
-    if raw is None:
-        raise RuntimeError('could not read {}'.format(path))
-    if raw.dtype != np.uint16:
+    if file_bits < 16:
         raise RuntimeError(
             '{} holds {}-bit data but this run reads 16-bit, and dividing it by 65535 '
             'would bring it back almost black; drop --config to let each file keep its '
-            'own depth'.format(path, raw.dtype.itemsize * 8))
+            'own depth'.format(path, file_bits))
+    if colour.dtype != np.uint16:
+        raise RuntimeError(
+            '{} holds {} data, and this runner reads 8- and 16-bit unsigned images only'
+            .format(path, colour.dtype))
 
-    if raw.ndim == 3 and raw.shape[2] == 4:
-        print('note       : {} carries an alpha channel, which is dropped: the result has '
-              'no transparency of its own'.format(os.path.basename(path)))
-        raw = raw[:, :, :3]                        # drop alpha before reversing
-    if raw.ndim == 2:
+    if colour.ndim == 2:
         print('WARNING    : {} is single-channel, so it is treated as greyscale; if this '
               'is a raw file it is a colour-filter array (a mosaic) and the result is '
               'meaningless'.format(os.path.basename(path)))
-        raw = cv2.cvtColor(raw, cv2.COLOR_GRAY2RGB)
+        colour = cv2.cvtColor(colour, cv2.COLOR_GRAY2RGB)
     else:
-        raw = raw[:, :, ::-1]                      # BGR -> RGB
+        colour = colour[:, :, ::-1]                # BGR -> RGB
 
-    return np.expand_dims(raw / 65535.0, axis=0), 16
+    return np.expand_dims(colour / 65535.0, axis=0), 16, alpha
 
 
-def to_output(blended, in_bit):
-    """(h, w, 3) float RGB in [0, 1] -> BGR array at the config's bit depth."""
+def to_output(blended, in_bit, alpha=None):
+    """(h, w, 3) float RGB in [0, 1] -> BGR array at the config's bit depth, with the
+    alpha channel put back if there is one to put back."""
     scale = (2 ** in_bit) - 1
     dtype = np.uint16 if in_bit == 16 else np.uint8
-    return (np.flip(blended, 2) * scale).astype(dtype)   # RGB -> BGR for OpenCV
+    output = (np.flip(blended, 2) * scale).astype(dtype)   # RGB -> BGR for OpenCV
+    if alpha is not None:
+        output = np.dstack([output, alpha])
+    return output
 
 
 def process(runner, device, path, output_path, max_side, tile, overlap, max_pixels,
@@ -452,15 +488,26 @@ def process(runner, device, path, output_path, max_side, tile, overlap, max_pixe
     if forced:
         config, net = runner.get(forced)
 
-    frame, bits = read_input(path, config)   # (1, h, w, 3) float RGB in [0, 1]
+    frame, bits, alpha = read_input(path, config)   # (1, h, w, 3) float RGB in [0, 1]
     _, height, width, _ = frame.shape
 
     if config is None:
         config, net = runner.get(config_name_for_bit_depth(bits))
 
-    problem = container_error(bits, os.path.splitext(output_path)[1].lower())
+    output_ext = os.path.splitext(output_path)[1].lower()
+    problem = container_error(bits, output_ext)
     if problem:
         raise RuntimeError(problem)
+
+    # Alpha rides along untouched, so it has to fit the container as well as the depth
+    # does.  JPEG is the one output here that cannot take it.
+    alpha = match_alpha(alpha, bits)
+    alpha_note = ''
+    if alpha is not None:
+        if output_ext == '.jpg':
+            alpha, alpha_note = None, ' (alpha dropped: JPEG cannot hold it)'
+        else:
+            alpha_note = ' +alpha'
 
     note = ''
     if max_side and max(height, width) > max_side:
@@ -468,6 +515,9 @@ def process(runner, device, path, output_path, max_side, tile, overlap, max_pixe
         scaled = (int(width * ratio), int(height * ratio))
         frame = np.expand_dims(
             cv2.resize(frame[0], dsize=scaled, interpolation=cv2.INTER_AREA), 0)
+        if alpha is not None:
+            # Whatever moves the picture has to move the alpha with it.
+            alpha = cv2.resize(alpha, dsize=scaled, interpolation=cv2.INTER_AREA)
         note = ' downscaled {}x{}->{}x{}'.format(width, height, scaled[0], scaled[1])
 
     # Past the ceiling we stop rather than quietly produce a smaller picture.
@@ -483,6 +533,8 @@ def process(runner, device, path, output_path, max_side, tile, overlap, max_pixe
     out_h, out_w = image.shape[0], image.shape[1]
     if out_h < config.refine_val or out_w < config.refine_val:
         raise RuntimeError('image too small after trimming ({}x{})'.format(out_w, out_h))
+    if alpha is not None:
+        alpha = alpha[:out_h, :out_w]   # the same top-left trim refine_image applies
 
     if device.type == 'cuda':
         torch.cuda.reset_peak_memory_stats()
@@ -491,7 +543,7 @@ def process(runner, device, path, output_path, max_side, tile, overlap, max_pixe
     blended, tiles = deblur_image(net, config, device, image, tile, overlap)
     elapsed = time.time() - started
 
-    output = to_output(blended, config.in_bit)   # RGB -> BGR
+    output = to_output(blended, config.in_bit, alpha)   # RGB -> BGR, alpha last
 
     # OpenCV defaults TIFF to LZW, which *inflates* 16-bit output: 147 MiB for data
     # that is 119 MiB raw, because the low byte of a smooth 16-bit gradient is close
@@ -507,7 +559,8 @@ def process(runner, device, path, output_path, max_side, tile, overlap, max_pixe
     if not written:
         raise RuntimeError('could not write {}'.format(output_path))
 
-    return elapsed, (width, height), (out_w, out_h), note, tiles, config.in_bit
+    return elapsed, (width, height), (out_w, out_h), note, tiles, \
+        '{}-bit{}'.format(config.in_bit, alpha_note)
 
 
 def main():
@@ -674,7 +727,7 @@ def main():
                                        directory, name)
 
         try:
-            elapsed, original, processed, note, tiles, bits = process(
+            elapsed, original, processed, note, tiles, depth = process(
                 runner, device, path, output_path,
                 args.max_side, tile, overlap, args.max_pixels, forced)
         except Exception as ex:
@@ -689,9 +742,9 @@ def main():
         else:
             peak = ''
         tiled = ' [{} tiles]'.format(tiles) if tiles > 1 else ''
-        print('[{:>3}/{}] {}  {}x{} -> {}x{}  {}-bit{}{}  {:.2f}s{}'
+        print('[{:>3}/{}] {}  {}x{} -> {}x{}  {}{}{}  {:.2f}s{}'
               .format(index, len(images), relative, original[0], original[1],
-                      processed[0], processed[1], bits, note, tiled, elapsed, peak))
+                      processed[0], processed[1], depth, note, tiled, elapsed, peak))
 
     print('')
     summary = 'Done: {} of {} image(s) in {:.1f}s'.format(done, len(images), total)
