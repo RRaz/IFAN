@@ -272,6 +272,11 @@ def read_input(path, config):
     A DNG is read as a bare TIFF, since that is all OpenCV sees.  It says so rather
     than pretending: everything that makes a DNG a DNG is skipped.
     """
+    if os.path.splitext(path)[1].lower() == '.dng':
+        print('WARNING    : {} is a DNG, read as a bare TIFF: its colour matrix, white '
+              'balance and linearisation are skipped, so it will not match the same '
+              'picture exported as TIFF or PNG'.format(os.path.basename(path)))
+
     if getattr(config, 'in_bit', 8) != 16:
         return read_frame(path, config.norm_val, None)
 
@@ -283,11 +288,6 @@ def read_input(path, config):
             '{} holds {}-bit data but this config reads 16-bit, and dividing it by '
             '65535 would bring it back almost black; use --config config_IFAN for '
             '8-bit files'.format(path, raw.dtype.itemsize * 8))
-
-    if os.path.splitext(path)[1].lower() == '.dng':
-        print('WARNING    : {} is a DNG, read here as a bare TIFF: its colour matrix, '
-              'white balance and linearisation are skipped, so it will not match the '
-              'same picture exported as TIFF or PNG'.format(os.path.basename(path)))
 
     if raw.ndim == 3 and raw.shape[2] == 4:
         raw = raw[:, :, :3]                        # drop alpha before reversing
