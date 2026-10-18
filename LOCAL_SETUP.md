@@ -304,6 +304,15 @@ Bit depth does **not** change GPU memory: the network works in `float32` either 
 the two configs are architecturally the same, so the ~1.9 GB tiled peak in §6 applies
 unchanged.
 
+It does change the size on disk, and there is little to be won back. At 20.7 megapixels
+a 16-bit result is **~108 MiB** — 3 channels x 2 bytes x 20.7 Mpx is 119 MiB of pixels to
+start with, and because the low byte of a smooth 16-bit gradient is close to random,
+lossless compression only just beats that. (16-bit PNG comes out the same 108 MiB.)
+`local_infer.py` writes 16-bit TIFF with Adobe Deflate for this reason; OpenCV's LZW
+default would *inflate* the same picture to 147 MiB, larger than raw. 8-bit output is
+unaffected. If you need a 16-bit file small enough to move around, **crop it** — scaling
+it down is what throws the detail away.
+
 ---
 
 ## 6. How tiling works

@@ -65,6 +65,10 @@ CONFIGS = {
 # Containers that can hold more than 8 bits per channel.  JPEG cannot, which is why
 # 16-bit output cannot simply keep the input extension the way the default does.
 DEEP_EXTS = ('.tif', '.tiff', '.png')
+# OpenCV gives the TIFF Deflate tag no name; 8 is COMPRESSION_ADOBE_DEFLATE, the widely
+# supported identifier.  Its deprecated twin, 32946, writes the same bytes but makes
+# libtiff warn on every write.
+TIFF_DEFLATE = 8
 
 
 def find_images(root, recursive):
@@ -330,8 +334,18 @@ def process(net, config, device, path, output_path, max_side, tile, overlap, max
 
     output = to_output(blended, getattr(config, 'in_bit', 8))   # RGB -> BGR
 
+    # OpenCV defaults TIFF to LZW, which *inflates* 16-bit output: 147 MiB for data
+    # that is 119 MiB raw, because the low byte of a smooth 16-bit gradient is close
+    # to random.  Adobe Deflate is lossless and gets the same picture into 108 MiB.
+    compressed = (getattr(config, 'in_bit', 8) == 16
+                  and output_path.lower().endswith(('.tif', '.tiff')))
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    if not cv2.imwrite(output_path, output):
+    if compressed:
+        written = cv2.imwrite(output_path, output,
+                              [cv2.IMWRITE_TIFF_COMPRESSION, TIFF_DEFLATE])
+    else:
+        written = cv2.imwrite(output_path, output)
+    if not written:
         raise RuntimeError('could not write {}'.format(output_path))
 
     return elapsed, (width, height), (out_w, out_h), note, tiles
