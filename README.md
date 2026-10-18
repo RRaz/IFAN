@@ -8,6 +8,54 @@ This repo contains training and evaluation code for the following paper:
 > *IEEE Computer Vision and Pattern Recognition (**CVPR**) 2021*<br>
 
 
+> **Unofficial fork — modified.** This is a modified copy of
+> [codeslake/IFAN](https://github.com/codeslake/IFAN) as of commit `66bf136`
+> (CVPR 2021, POSTECH). It is not affiliated with, or endorsed by, the original
+> authors. Upstream is licensed **AGPL-3.0** ([`LICENSE`](LICENSE)), and this fork
+> remains under that same licence.
+
+## Modifications in this fork
+
+**Modified 2026-10-18.** The network, the training code and the weights are
+untouched. Everything added is about running large images locally, which upstream
+cannot do — it downscales any input over 1920 px, so big images come back *smaller
+than they went in*.
+
+- **Never downscales.** Full resolution is the default, at any size.
+- **Tiles automatically.** Anything larger than 1024 px is split into overlapping
+  tiles and feathered back together, so peak GPU memory stays near 1.9 GB regardless
+  of input size, instead of the ~1.8 GB *per megapixel* a whole-image pass needs
+  (a 22 Mpx image needs a 19.6 GiB allocation and fails outright on a 12 GB card).
+- **Stops at a ceiling rather than shrinking.** An image over 100 megapixels is
+  refused with a message naming the limit, instead of quietly coming back smaller.
+- **Batches folders of images.** The checkpoint loads once and every image in a tree
+  is processed; a per-image failure is reported without stopping the run.
+- **Results stay with the sources,** in a `deblurred/` subfolder and with a `_db`
+  suffix, so they cannot be mixed up with the originals.
+- **Windows drop-zone runner** (`run_infer.bat`): drop a folder onto it, or put
+  images in `input\` and double-click.
+- **No `cog`/Replicate runtime required** — upstream `predict.py` needs it.
+
+Start with **[`LOCAL_SETUP.md`](LOCAL_SETUP.md)** for setup, usage and verification.
+
+### Files changed from upstream
+
+| File | Change |
+|---|---|
+| `predict.py` | `max_side` raised `1920` → `5760` (only affects the Cog/Replicate path) |
+| `README.md` | this notice |
+| `local_infer.py` | **new** — standalone tiled batch runner |
+| `run_infer.bat` | **new** — Windows drop-zone wrapper |
+| `LOCAL_SETUP.md` | **new** — setup, usage, verification |
+| `.gitignore` | **new** — excludes `.venv/`, `ckpt/` and generated output |
+| `input/README.txt` | **new** — drop-zone instructions |
+| `demo/input/input_large.jpg` | **new** — 20.7 Mpx sample that exercises tiling |
+
+Every other upstream file is unmodified, and the full upstream history is preserved.
+The pretrained weights are **not** redistributed here; download them from the links
+in §3 below, as upstream intends.
+
+
 <p align="left">
   <a href="https://junyonglee.me/projects/IFAN">
     <img width=85% src="./assets/teaser.gif"/>

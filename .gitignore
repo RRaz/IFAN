@@ -1,0 +1,21 @@
+# Virtual environment (uv also writes its own .gitignore inside .venv)
+.venv/
+
+# Pretrained weights: 113 MB and re-downloadable from the README links
+ckpt/
+
+# Where run_infer.bat writes results: a "deblurred" subfolder beside the inputs,
+# with a "_db" suffix on each file, or the project "output" folder with --dest output
+# (these two are deliberately unanchored - results appear beside any input folder)
+deblurred/
+*_db.*
+/output/
+
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Keep the project drop-zone folder, but not whatever gets dropped into it.
+# Anchored with a leading slash so it cannot touch demo/input/
+/input/*
+!/input/README.txt

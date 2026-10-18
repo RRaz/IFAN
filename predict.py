@@ -27,7 +27,9 @@ class Predictor(cog.Predictor):
 
     @cog.input("image", type=Path, help="Input image, only supports images with .png and .jpg extensions")
     def predict(self, image):
-        max_side = 1920
+        # Raised from 1920 to 5760 (+200%) so that large inputs are no longer
+        # downscaled to a result smaller than the original image.
+        max_side = 5760
         assert str(image).split('.')[-1] in ['png', 'jpg'], 'image should end with ".jpg" or ".png"'
 
         C_cpu = read_frame(str(image), self.config.norm_val, None)
