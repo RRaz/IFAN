@@ -26,6 +26,10 @@ So this runner never downscales.  Instead it:
   * refuses images above a pixel ceiling with a message that names the limit,
     rather than quietly shrinking them.
 
+Bit depth follows the file: a 16-bit TIFF is read, deblurred and written at 16 bits
+with no arguments, an 8-bit JPEG stays 8-bit, and a folder holding both gets the right
+treatment for each.  --config forces one mode for a whole run when that is wanted.
+
 No arguments are needed at all.  The options listed by --help exist for tuning
 only; every one of them has a working default.
 """
@@ -51,8 +55,21 @@ DEFAULT_MAX_PIXELS = 100_000_000   # ceiling, refused with a message naming the 
 DEFAULT_DEST = 'both'              # 'output', 'subfolder', 'suffix' or 'both'
 DEFAULT_SUBFOLDER = 'deblurred'    # folder created beside the inputs
 DEFAULT_SUFFIX = '_db'             # appended to each output file name
-DEFAULT_CONFIG = 'config_IFAN'     # 8-bit in and out, the published weights
+DEFAULT_CONFIG = 'auto'            # match each file's own bit depth
 IMAGE_EXTS = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.webp')
+HERE = os.path.dirname(os.path.abspath(__file__))
+# The network downsamples by this factor, so tile geometry and the output trim are
+# aligned to it.  Both configurations set `refine_val` to this; it is mirrored here only
+# so that tiles can be settled before a configuration is chosen.
+REFINE_VAL = 8
+# Each configuration has its own weights.  `IFAN_16bit.pytorch` is an optional extra
+# download; the two architectures are identical, so the 8-bit checkpoint loads into the
+# 16-bit configuration when the matching one is absent -- see `checkpoint_for`.
+CKPTS = {
+    'config_IFAN':       os.path.join(HERE, 'ckpt', 'IFAN.pytorch'),
+    'config_IFAN_16bit': os.path.join(HERE, 'ckpt', 'IFAN_16bit.pytorch'),
+}
+FALLBACK_CKPT = os.path.join(HERE, 'ckpt', 'IFAN.pytorch')
 
 # Configurations this runner knows how to pair with a checkpoint: name -> (mode for
 # get_config, loader).  The two differ only in `in_bit` (8 against 16) and in the data
@@ -246,11 +263,11 @@ def deblur_image(net, config, device, image, tile, overlap):
 
 
 def input_bit_depth(path):
-    """Bits per channel in `path`, or None if it cannot be read.
+    """Bits per channel stored in `path`, or None if it cannot be read.
 
-    Formats that cannot hold more than 8 bits are answered without opening the file;
-    the rest are probed.  This only ever feeds a warning -- it never changes how a
-    file is read.
+    Formats that cannot hold more than 8 bits are answered from the extension without
+    opening the file; the rest are probed.  `read_input` can also answer this while
+    reading for real, and prefers to.
     """
     if os.path.splitext(path)[1].lower() not in DEEP_EXTS:
         return 8
@@ -260,36 +277,145 @@ def input_bit_depth(path):
     return probe.dtype.itemsize * 8
 
 
-def read_input(path, config):
-    """Read `path` as (1, h, w, 3) float RGB in [0, 1].
+def config_name_for_bit_depth(bits):
+    """The configuration that reads and writes `bits` bits per channel."""
+    return 'config_IFAN_16bit' if bits > 8 else 'config_IFAN'
 
-    The 8-bit path is upstream's `read_frame`, untouched.  The 16-bit path reads at
-    native depth, which is what upstream's 16-bit branch does too, except that it
-    drops an alpha channel first: upstream reverses the last axis, which would turn a
-    four-channel BGRA image into ARGB and quietly corrupt it, and Affinity TIFF
+
+def output_extension(input_ext, requested):
+    """The extension to write a result with, and whether it had to be changed.
+
+    `requested` is whatever --ext said.  "keep" means the input's own extension, except
+    for a format this runner can read but not write back -- a DNG -- where TIFF stands
+    in, because otherwise the result has nowhere to go and the run stops for a reason the
+    user could do nothing about.
+    """
+    if requested != 'keep':
+        return '.' + requested, False
+    if input_ext.lower() in IMAGE_EXTS:
+        return input_ext, False
+    return '.tif', True
+
+
+def container_error(bits, output_ext):
+    """Why `output_ext` cannot hold `bits` bits per channel, or None if it can."""
+    if bits > 8 and output_ext not in DEEP_EXTS:
+        return ('{} cannot hold {}-bit output; use --ext tif (or png), or drop --config '
+                'to let each file keep its own depth'
+                .format(output_ext or 'that format', bits))
+    return None
+
+
+def checkpoint_for(config_name, requested):
+    """Checkpoint to load for `config_name`, and a note when it is not the matching one.
+
+    Each configuration has its own weights, but the two architectures are identical, so
+    either checkpoint loads into either.  When the matching one is absent this falls back
+    to the 8-bit checkpoint rather than refusing to run -- input and output still keep
+    full precision, only the model's own correction is the 8-bit one -- and says so,
+    because otherwise the run looks like it used weights that are not there.
+    """
+    if requested:
+        return requested, None
+    own = CKPTS[config_name]
+    if os.path.isfile(own):
+        return own, None
+    if not os.path.isfile(FALLBACK_CKPT):
+        raise RuntimeError(
+            'no checkpoint found: neither {} nor {}.  Download them from the README '
+            'links and place them in ckpt\\.'.format(own, FALLBACK_CKPT))
+    return FALLBACK_CKPT, (
+        '{} is not there, so the 8-bit checkpoint is used for {}: the correction is the '
+        '8-bit model\'s, carried through at full precision.  Copy {} into ckpt\\ to use '
+        'the weights trained for 16-bit.'
+        .format(os.path.basename(own), config_name, os.path.basename(own)))
+
+
+class Runner:
+    """Loads one network per configuration, on demand, and reuses it.
+
+    A folder can hold 8-bit and 16-bit files side by side and each wants its own
+    configuration, so both networks may end up resident.  Their parameters are small
+    next to the activations, which are per tile.
+    """
+
+    def __init__(self, device, requested_ckpt):
+        self.device = device
+        self.requested_ckpt = requested_ckpt
+        self._loaded = {}
+        self._noted = set()
+
+    def get(self, config_name):
+        """Return `(config, network)` for `config_name`, loading it the first time."""
+        if config_name not in self._loaded:
+            mode, load_config = CONFIGS[config_name]
+            config = load_config('IFAN_CVPR2021', mode, config_name)
+            config.network = 'IFAN'
+            config.device = str(self.device)
+            if config.refine_val != REFINE_VAL:
+                raise RuntimeError('{} refines by {}, but this runner assumes {}'
+                                   .format(config_name, config.refine_val, REFINE_VAL))
+            ckpt, note = checkpoint_for(config_name, self.requested_ckpt)
+            if note and config_name not in self._noted:
+                print('note       : {}'.format(note))
+                self._noted.add(config_name)
+            self._loaded[config_name] = (config, load_network(ckpt, config, self.device))
+        return self._loaded[config_name]
+
+
+def read_input(path, config=None):
+    """Read `path` as (1, h, w, 3) float RGB in [0, 1], with the bits per channel used.
+
+    With a `config` given, the mode is fixed by it.  With `config=None` the file decides,
+    which is what makes a 16-bit input come back 16-bit without being asked: formats that
+    cannot hold more than 8 bits go straight to upstream's `read_frame`, and anything
+    deeper is read at native depth.
+
+    The 8-bit read is upstream's, untouched.  The 16-bit read is upstream's too, except
+    that it drops an alpha channel first -- upstream reverses the last axis, which would
+    turn a four-channel BGRA image into ARGB and quietly corrupt it, and Affinity TIFF
     exports commonly carry alpha.
 
-    A DNG is read as a bare TIFF, since that is all OpenCV sees.  It says so rather
-    than pretending: everything that makes a DNG a DNG is skipped.
+    A DNG is read as a bare TIFF, since that is all OpenCV sees.  It says so rather than
+    pretending: everything that makes a DNG a DNG is skipped.
     """
-    if os.path.splitext(path)[1].lower() == '.dng':
+    ext = os.path.splitext(path)[1].lower()
+    if ext == '.dng':
         print('WARNING    : {} is a DNG, read as a bare TIFF: its colour matrix, white '
               'balance and linearisation are skipped, so it will not match the same '
               'picture exported as TIFF or PNG'.format(os.path.basename(path)))
 
-    if getattr(config, 'in_bit', 8) != 16:
-        return read_frame(path, config.norm_val, None)
+    raw = None
+    if config is None:
+        # The file's own depth decides.  For a format that cannot be deep this needs no
+        # read at all; otherwise the read below doubles as the probe, so nothing is read
+        # twice.
+        if ext not in DEEP_EXTS:
+            bits = 8
+        else:
+            raw = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+            if raw is None:
+                raise RuntimeError('could not read {}'.format(path))
+            bits = raw.dtype.itemsize * 8
+    else:
+        bits = getattr(config, 'in_bit', 8)
 
-    raw = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+    if bits <= 8:
+        return read_frame(path, 255, None), 8
+
+    if raw is None:
+        raw = cv2.imread(path, cv2.IMREAD_UNCHANGED)
     if raw is None:
         raise RuntimeError('could not read {}'.format(path))
     if raw.dtype != np.uint16:
         raise RuntimeError(
-            '{} holds {}-bit data but this config reads 16-bit, and dividing it by '
-            '65535 would bring it back almost black; use --config config_IFAN for '
-            '8-bit files'.format(path, raw.dtype.itemsize * 8))
+            '{} holds {}-bit data but this run reads 16-bit, and dividing it by 65535 '
+            'would bring it back almost black; drop --config to let each file keep its '
+            'own depth'.format(path, raw.dtype.itemsize * 8))
 
     if raw.ndim == 3 and raw.shape[2] == 4:
+        print('note       : {} carries an alpha channel, which is dropped: the result has '
+              'no transparency of its own'.format(os.path.basename(path)))
         raw = raw[:, :, :3]                        # drop alpha before reversing
     if raw.ndim == 2:
         print('WARNING    : {} is single-channel, so it is treated as greyscale; if this '
@@ -299,7 +425,7 @@ def read_input(path, config):
     else:
         raw = raw[:, :, ::-1]                      # BGR -> RGB
 
-    return np.expand_dims(raw / 65535.0, axis=0)
+    return np.expand_dims(raw / 65535.0, axis=0), 16
 
 
 def to_output(blended, in_bit):
@@ -309,10 +435,28 @@ def to_output(blended, in_bit):
     return (np.flip(blended, 2) * scale).astype(dtype)   # RGB -> BGR for OpenCV
 
 
-def process(net, config, device, path, output_path, max_side, tile, overlap, max_pixels):
-    """Deblur a single image and write it to `output_path`."""
-    frame = read_input(path, config)   # (1, h, w, 3) float RGB in [0, 1]
+def process(runner, device, path, output_path, max_side, tile, overlap, max_pixels,
+            forced=None):
+    """Deblur one image and write it to `output_path`.
+
+    `forced` names a configuration to use whatever the file holds; with it left None the
+    file's own bit depth decides, and the result is written at that depth.  The container
+    is checked once the file has been read and before any inference, so a mismatch costs
+    only the read.
+    """
+    config = net = None
+    if forced:
+        config, net = runner.get(forced)
+
+    frame, bits = read_input(path, config)   # (1, h, w, 3) float RGB in [0, 1]
     _, height, width, _ = frame.shape
+
+    if config is None:
+        config, net = runner.get(config_name_for_bit_depth(bits))
+
+    problem = container_error(bits, os.path.splitext(output_path)[1].lower())
+    if problem:
+        raise RuntimeError(problem)
 
     note = ''
     if max_side and max(height, width) > max_side:
@@ -343,12 +487,12 @@ def process(net, config, device, path, output_path, max_side, tile, overlap, max
     blended, tiles = deblur_image(net, config, device, image, tile, overlap)
     elapsed = time.time() - started
 
-    output = to_output(blended, getattr(config, 'in_bit', 8))   # RGB -> BGR
+    output = to_output(blended, config.in_bit)   # RGB -> BGR
 
     # OpenCV defaults TIFF to LZW, which *inflates* 16-bit output: 147 MiB for data
     # that is 119 MiB raw, because the low byte of a smooth 16-bit gradient is close
     # to random.  Adobe Deflate is lossless and gets the same picture into 108 MiB.
-    compressed = (getattr(config, 'in_bit', 8) == 16
+    compressed = (config.in_bit == 16
                   and output_path.lower().endswith(('.tif', '.tiff')))
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     if compressed:
@@ -359,7 +503,7 @@ def process(net, config, device, path, output_path, max_side, tile, overlap, max
     if not written:
         raise RuntimeError('could not write {}'.format(output_path))
 
-    return elapsed, (width, height), (out_w, out_h), note, tiles
+    return elapsed, (width, height), (out_w, out_h), note, tiles, config.in_bit
 
 
 def main():
@@ -380,9 +524,9 @@ def main():
     parser.add_argument('--output', '-o', default=None,
                         help='destination root, used by --dest output '
                              '(default: <project>\\output)')
-    parser.add_argument('--ckpt', default=os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                                      'ckpt', 'IFAN.pytorch'),
-                        help='path to the pretrained checkpoint')
+    parser.add_argument('--ckpt', default=None,
+                        help='path to the pretrained checkpoint (default: ckpt\\IFAN.pytorch, '
+                             'or ckpt\\IFAN_16bit.pytorch for 16-bit input when it is there)')
     parser.add_argument('--max-side', type=int, default=DEFAULT_MAX_SIDE,
                         help='downscale inputs whose longest side exceeds this many pixels; '
                              '0 (the default) never downscales')
@@ -398,10 +542,11 @@ def main():
     parser.add_argument('--recursive', '-r', action='store_true',
                         help='recurse into subfolders, keeping the folder structure')
     parser.add_argument('--cpu', action='store_true', help='run on CPU even if a GPU is available')
-    parser.add_argument('--config', default=DEFAULT_CONFIG, choices=list(CONFIGS),
-                        help='model configuration: config_IFAN (default) reads and writes '
-                             '8-bit; config_IFAN_16bit reads 16-bit input and writes 16-bit '
-                             'output, which needs --ext tif or png')
+    parser.add_argument('--config', default=DEFAULT_CONFIG,
+                        choices=[DEFAULT_CONFIG] + list(CONFIGS),
+                        help='model configuration: auto (default) matches each input file\'s '
+                             'own bit depth; config_IFAN forces 8-bit in and out; '
+                             'config_IFAN_16bit forces 16-bit')
     parser.add_argument('--ext', default='keep', choices=['keep', 'png', 'jpg', 'tif'],
                         help='output format; "keep" preserves each input extension (default)')
     args = parser.parse_args()
@@ -410,36 +555,37 @@ def main():
     if args.dest is None:
         args.dest = 'output' if args.output is not None else DEFAULT_DEST
     if args.dest == 'output' and args.output is None:
-        args.output = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'output')
+        args.output = os.path.join(HERE, 'output')
 
     if not os.path.exists(args.input):
         sys.exit('Input not found: {}'.format(args.input))
-    if not os.path.isfile(args.ckpt):
-        sys.exit('Checkpoint not found: {}\nDownload it from the README links and place it there.'
-                 .format(args.ckpt))
+    if args.ckpt and not os.path.isfile(args.ckpt):
+        sys.exit('Checkpoint not found: {}'.format(args.ckpt))
 
     device = torch.device('cpu') if args.cpu or not torch.cuda.is_available() else torch.device('cuda')
-    mode, load_config = CONFIGS[args.config]
-    config = load_config('IFAN_CVPR2021', mode, args.config)
-    config.network = 'IFAN'
-    config.device = str(device)
 
-    tile = args.tile if args.tile <= 0 else args.tile - args.tile % config.refine_val
+    tile = args.tile if args.tile <= 0 else args.tile - args.tile % REFINE_VAL
     if args.tile > 0 and tile != args.tile:
-        print('note       : tile rounded down to {} (multiple of {})'
-              .format(tile, config.refine_val))
-    overlap = args.overlap - args.overlap % config.refine_val
+        print('note       : tile rounded down to {} (multiple of {})'.format(tile, REFINE_VAL))
+    overlap = args.overlap - args.overlap % REFINE_VAL
 
     print('device     : {}{}'.format(device, '' if device.type == 'cpu' else
                                      ' ({})'.format(torch.cuda.get_device_name(0))))
-    print('model      : {} ({}-bit in and out)'.format(args.config, config.in_bit))
+    print('model      : {}'.format(args.config if args.config != DEFAULT_CONFIG else
+                                   'auto, each file at its own bit depth'))
     print('max side   : {}'.format('unlimited' if not args.max_side else args.max_side))
     print('tiling     : {}'.format('disabled' if tile <= 0 else
                                    '{} px tiles, {} px overlap'.format(tile, overlap)))
     print('pixel limit: {}'.format('none' if not args.max_pixels else
                                    '{:.0f} megapixels'.format(args.max_pixels / 1e6)))
 
-    net = load_network(args.ckpt, config, device)
+    # Configurations are loaded on demand, one per bit depth actually encountered, so all
+    # that can be checked here is that there is a checkpoint to load at all.
+    forced = None if args.config == DEFAULT_CONFIG else args.config
+    if not args.ckpt and not any(os.path.isfile(p) for p in CKPTS.values()):
+        sys.exit('No checkpoint found in {}\nDownload one from the README links and place '
+                 'it there.'.format(os.path.dirname(FALLBACK_CKPT)))
+    runner = Runner(device, args.ckpt)
 
     # Results are written relative to the input: into a subfolder of it, beside each
     # image with a suffix, or both.  "output" sends them to a separate root instead.
@@ -470,35 +616,23 @@ def main():
             return
         sys.exit('No images found under {}'.format(args.input))
 
-    # A DNG can be read here but not written, so it can never keep its own extension.
-    if args.ext == 'keep':
-        raws = [p for p in images if os.path.splitext(p)[1].lower() == '.dng']
-        if raws:
-            sys.exit('DNG cannot be written back out, only read; add --ext tif (or png) '
-                     'to choose a container for the result ({}).'
-                     .format(os.path.basename(raws[0])))
-
-    # 16-bit results need a container that can hold them; JPEG and WebP cannot.
-    if getattr(config, 'in_bit', 8) > 8:
-        if args.ext != 'keep' and '.' + args.ext not in DEEP_EXTS:
-            sys.exit('--ext {} cannot hold {}-bit output.  Use --ext tif (or png), or run '
-                     'with --config config_IFAN for 8-bit results.'
-                     .format(args.ext, config.in_bit))
-        if args.ext == 'keep':
-            blocked = [p for p in images
-                       if os.path.splitext(p)[1].lower() not in DEEP_EXTS]
-            if blocked:
-                sys.exit('{} of {} input(s) end in a format that cannot hold {}-bit output '
-                         '({}).  Use --ext tif, or run with --config config_IFAN.'
-                         .format(len(blocked), len(images), config.in_bit,
-                                 os.path.basename(blocked[0])))
-    else:
-        probe = next((p for p in images
-                      if os.path.splitext(p)[1].lower() in DEEP_EXTS), None)
-        if probe and (input_bit_depth(probe) or 0) > 8:
-            print('WARNING    : {} holds 16-bit data but this config reads 8-bit, so the '
-                  'extra precision is discarded; pass --config config_IFAN_16bit to keep '
-                  'it'.format(os.path.basename(probe)))
+    # With one mode forced on every file, what the run produces is known up front, so a
+    # mismatch is reported before any work rather than one file at a time.
+    if forced:
+        forced_bits = 16 if forced == 'config_IFAN_16bit' else 8
+        for path in images:
+            output_ext = output_extension(os.path.splitext(path)[1].lower(), args.ext)[0]
+            problem = container_error(forced_bits, output_ext)
+            if problem:
+                sys.exit('{}: {}'.format(os.path.basename(path), problem))
+        if forced_bits == 8:
+            probe = next((p for p in images
+                          if os.path.splitext(p)[1].lower() in DEEP_EXTS
+                          and (input_bit_depth(p) or 8) > 8), None)
+            if probe:
+                print('WARNING    : {} holds 16-bit data but config_IFAN reads and writes '
+                      '8-bit, so the extra precision is discarded; drop --config to keep '
+                      'each file at its own depth'.format(os.path.basename(probe)))
 
     if args.dest == 'output':
         destination = os.path.abspath(args.output)
@@ -518,11 +652,16 @@ def main():
     total = 0.0
     done = 0
     failed = 0
+    substitution_noted = False
     for index, path in enumerate(images, 1):
         relative = os.path.relpath(path, root)
         directory, filename = os.path.split(relative)
         stem, input_ext = os.path.splitext(filename)
-        ext = input_ext if args.ext == 'keep' else '.' + args.ext
+        ext, changed = output_extension(input_ext, args.ext)
+        if changed and not substitution_noted:
+            print('note       : {} cannot be written back out, so results are TIFF'
+                  .format(input_ext))
+            substitution_noted = True
         name = stem + (args.suffix if beside else '') + ext
         if args.dest == 'suffix':
             output_path = os.path.join(root, directory, name)
@@ -531,9 +670,9 @@ def main():
                                        directory, name)
 
         try:
-            elapsed, original, processed, note, tiles = process(
-                net, config, device, path, output_path,
-                args.max_side, tile, overlap, args.max_pixels)
+            elapsed, original, processed, note, tiles, bits = process(
+                runner, device, path, output_path,
+                args.max_side, tile, overlap, args.max_pixels, forced)
         except Exception as ex:
             failed += 1
             print('[{:>3}/{}] FAILED {}: {}'.format(index, len(images), relative, ex))
@@ -546,9 +685,9 @@ def main():
         else:
             peak = ''
         tiled = ' [{} tiles]'.format(tiles) if tiles > 1 else ''
-        print('[{:>3}/{}] {}  {}x{} -> {}x{}{}{}  {:.2f}s{}'
+        print('[{:>3}/{}] {}  {}x{} -> {}x{}  {}-bit{}{}  {:.2f}s{}'
               .format(index, len(images), relative, original[0], original[1],
-                      processed[0], processed[1], note, tiled, elapsed, peak))
+                      processed[0], processed[1], bits, note, tiled, elapsed, peak))
 
     print('')
     summary = 'Done: {} of {} image(s) in {:.1f}s'.format(done, len(images), total)

@@ -44,13 +44,13 @@ Start with **[`LOCAL_SETUP.md`](LOCAL_SETUP.md)** for setup, usage and verificat
 |---|---|
 | `predict.py` | `max_side` raised `1920` → `5760` (only affects the Cog/Replicate path) |
 | `README.md` | this notice |
-| `local_infer.py` | **new** — standalone tiled batch runner, 8 or 16 bits per channel |
+| `local_infer.py` | **new** — standalone tiled batch runner; 8 or 16 bits per channel, following each file |
 | `run_infer.bat` | **new** — Windows drop-zone wrapper |
 | `LOCAL_SETUP.md` | **new** — setup, usage, verification |
 | `.gitignore` | **new** — excludes `.venv/`, `ckpt/` and generated output |
 | `input/README.txt` | **new** — drop-zone instructions |
 | `demo/input/input_large.jpg` | **new** — 20.7 Mpx sample that exercises tiling |
-| `AFFINITY_INTEGRATION.md` | **new** — open notes on driving this from Affinity 3 |
+| `AFFINITY_INTEGRATION.md` | **new** — **add-on, not part of the current work**: open notes on driving this from Affinity 3 |
 
 Every other upstream file is unmodified, and the full upstream history is preserved.
 The pretrained weights are **not** redistributed here; download them from the links

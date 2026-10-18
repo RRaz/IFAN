@@ -14,13 +14,14 @@ upstream project documentation is in [`README.md`](README.md) and is unchanged.
 | File | Status | Purpose |
 |---|---|---|
 | `predict.py` | **modified** | `max_side` raised `1920` → `5760`. Only affects the Cog/Replicate path, which is not used locally |
-| `local_infer.py` | **new** | Batch runner: processes folders of images, tiles large ones |
+| `local_infer.py` | **new** | Batch runner: processes folders of images, tiles large ones, follows each file's bit depth |
 | `run_infer.bat` | **new** | Windows wrapper around `local_infer.py` (drop zone + drag-and-drop) |
 | `demo/input/input_large.jpg` | **new** | 4532x4578 (20.7 Mpx) sample that exercises tiling |
 | `input/` | **new** | Drop-zone folder used by `run_infer.bat` |
 | `output/` | created on demand | Destination only for `--dest output`; the default writes beside the inputs, so it normally does not exist |
 | `.gitignore` | **new** | Excludes `.venv/`, `ckpt/`, `deblurred/`, `*_db.*`, `output/`, Python caches |
-| `ckpt/IFAN.pytorch` | **new** | Pretrained weights, 113 MB (not for committing) |
+| `ckpt/IFAN.pytorch` | **new** | Pretrained weights, 113 MB, 8-bit (not for committing) |
+| `ckpt/IFAN_16bit.pytorch` | **new** | Pretrained weights, 113 MB, 16-bit (§5.6; also not for committing) |
 | `.venv/` | **new** | Python 3.11 virtual environment |
 
 Everything else is unmodified upstream code.
@@ -129,11 +130,13 @@ and `IFAN_16bit`. Each needs its matching config (`config_IFAN_8`, etc.), which 
 repo already provides, but `local_infer.py` only knows the two that matter here:
 
 ```bat
-copy ckpt_tmp\IFAN_16bit.pytorch ckpt\IFAN_16bit.pytorch   REM optional; see §5.6
+copy ckpt_tmp\IFAN_16bit.pytorch ckpt\IFAN_16bit.pytorch   REM the 16-bit weights; see §5.6
 ```
 
-Keep `IFAN.pytorch` (8-bit) and, if you want 48-bit output, `IFAN_16bit.pytorch`.
-Delete the rest if you do not need them.
+Keep `IFAN.pytorch` (8-bit) and `IFAN_16bit.pytorch` (16-bit). Delete the rest if you do
+not need them. `IFAN.pytorch` is the one that has to be there: without
+`IFAN_16bit.pytorch` a 16-bit input still works and still comes back 16-bit, but the
+correction applied is the 8-bit model's and the run says which weights it used.
 
 ---
 
@@ -166,8 +169,8 @@ run_infer.bat "D:\photos" --tile 512           REM less GPU memory
 ```
 
 No options are needed for normal use: the defaults never downscale, tile large
-images automatically, and stop with a message if an image is past the ceiling.
-§5.4 lists the other destination layouts.
+images automatically, keep each file at its own bit depth (§5.6), and stop with a
+message if an image is past the ceiling. §5.4 lists the other destination layouts.
 
 When the file is double-clicked the window stays open at the end so the results
 are readable. Set `IFAN_NO_PAUSE=1` to suppress that, e.g. when calling it from
@@ -194,14 +197,14 @@ a destination is named.
 | `--subfolder` | `deblurred` | Subfolder name used by `--dest subfolder` and `both` |
 | `--suffix` | `_db` | File-name suffix used by `--dest suffix` and `both` |
 | `--output`, `-o` | `<project>\output` | Destination root for `--dest output`; naming it implies `--dest output` |
-| `--ckpt` | `ckpt\IFAN.pytorch` | Path to the pretrained checkpoint |
+| `--ckpt` | per bit depth | Checkpoint to load; by default the matching one, falling back to `ckpt\IFAN.pytorch` when it is absent |
 | `--max-side` | `0` | Downscale inputs whose longest side exceeds this. **`0` = never downscale** |
 | `--max-pixels` | `100000000` | Refuse images above this many pixels rather than shrinking them. **`0` = no ceiling** |
 | `--tile` | `1024` | Largest tile side. **`0` disables tiling** (memory then scales with the image) |
 | `--overlap` | `256` | Feather width between neighbouring tiles |
 | `--recursive`, `-r` | off | Recurse into subfolders, preserving the folder structure |
 | `--cpu` | off | Force CPU even when a GPU is present |
-| `--config` | `config_IFAN` | `config_IFAN` (8-bit) or `config_IFAN_16bit` (16-bit; see §5.6) |
+| `--config` | `auto` | `auto` follows each file's bit depth (§5.6); `config_IFAN` forces 8-bit, `config_IFAN_16bit` forces 16-bit |
 | `--ext` | `keep` | Output format: `keep`, `png`, `jpg` or `tif` |
 
 `--tile` and `--overlap` are rounded down to a multiple of 8 (the network
@@ -248,8 +251,11 @@ Done: 3 of 3 image(s) in 2.8s (average 0.95s)
 - **Files, not folders, are the unit of work.** Subfolders are walked when
   `--recursive` is on (the batch file always sets it) and the structure is mirrored
   into the destination folder.
-- **The checkpoint is loaded once**, before the loop, so per-image time is just
-  inference. A folder of 200 photos does not pay the ~1 s load 200 times.
+- **Checkpoints are loaded once each, on demand.** At most one load per configuration in
+  a run, so a folder of 200 photos does not pay the ~1 s load 200 times, and a folder of
+  mixed 8-bit and 16-bit files pays it twice and no more (§5.6).
+- **Bit depth is decided per file**, not per run, so a folder holding 8-bit JPEGs and
+  16-bit TIFFs together comes out right in a single pass (§5.6).
 - **Each image is tiled independently**, so one huge image mixed in with small ones
   does not increase peak memory for the rest of the batch.
 - **A failure skips that image and continues.** A corrupt file, an unreadable
@@ -262,44 +268,63 @@ Done: 3 of 3 image(s) in 2.8s (average 0.95s)
 
 ### 5.6 16-bit (48-bit colour) output
 
-By default `local_infer.py` reads and writes **8 bits per channel**, which is what the
-published `IFAN.pytorch` weights were trained on. For 48-bit colour — 16 bits each in
-red, green and blue, matching Affinity's 16-bit mode — select the 16-bit config:
+**Bit depth follows the file, so there is nothing to set.** A 16-bit TIFF or PNG is read,
+deblurred and written at 16 bits, an 8-bit JPEG stays 8-bit, and a folder holding both gets
+the right treatment for each — the two models are loaded on demand within the one run. 16
+bits each in red, green and blue is Affinity's 16-bit mode. Each result line names the depth
+it was written at:
 
-```bat
-.venv\Scripts\python.exe local_infer.py -i D:\photo.tif --config config_IFAN_16bit --ext tif
+```
+[  2/2] IMG_1676_16.tiff  4571x4578 -> 4568x4576  16-bit [36 tiles]  7.22s peak GPU 1924 MiB
 ```
 
-Three things have to line up, and all three are checked:
+`--config` overrides the automatic choice when one mode is wanted for a whole run — here
+forcing 8-bit output whatever the inputs are:
 
-- **Config and file bit depth must match, in both directions.** `config_IFAN_16bit`
-  divides by 65535, so feeding it an 8-bit file would produce something close to
-  black; that is refused with a message instead of being written out. The other way
-  round, the 8-bit config quietly discards the extra precision of a 16-bit file, so it
-  says so:
+```bat
+.venv\Scripts\python.exe local_infer.py -i D:\photos --config config_IFAN --ext png
+```
+
+Three things have to line up, and every one of them is checked rather than assumed:
+
+- **The weights for that depth.** 16-bit input wants `ckpt\IFAN_16bit.pytorch` (§4.2).
+  When it is not there the run falls back to the 8-bit checkpoint rather than refusing,
+  because the two architectures are identical and either loads into either, and it says
+  which one it used:
 
   ```
-  WARNING    : photo.tif holds 16-bit data but this config reads 8-bit, so the extra
-                precision is discarded; pass --config config_IFAN_16bit to keep it
+  note       : IFAN_16bit.pytorch is not there, so the 8-bit checkpoint is used for
+                config_IFAN_16bit: the correction is the 8-bit model's, carried through
+                at full precision.
   ```
 
-- **The container must be able to hold 16 bits.** JPEG cannot, and neither can WebP, so
-  `--ext tif` (or `png`) is required and `--ext jpg` is refused. TIFF is the natural
-  interchange for Affinity. For the same reason `--ext keep` is refused on a folder of
-  JPEGs, whose outputs would inherit the `.jpg` extension.
+- **The container for that depth.** JPEG cannot hold 16 bits and neither can WebP, so a
+  16-bit result needs TIFF or PNG — and since a 16-bit input already is one, `--ext keep`
+  gets this right on its own. `--ext jpg` on a 16-bit file is a real contradiction and is
+  refused, per file, with the reason. A DNG can be read but not written back out, so a
+  DNG input produces a TIFF: leaving the user to discover which flag fixes that would be
+  worse than choosing the only container that works.
 
-- **Alpha is handled.** Affinity's TIFF exports often carry an alpha channel.
-  `IMREAD_UNCHANGED` returns it as a fourth channel, and upstream's 16-bit read would
-  reorder it into the colour channels and corrupt the picture, so this runner drops
-  alpha first.
+- **The config against the file, in both directions.** `config_IFAN_16bit` divides by
+  65535, so forcing it on an 8-bit file would come back almost black; that is refused
+  instead of being written out. Forcing `config_IFAN` on a 16-bit file says what it is
+  throwing away:
 
-The 16-bit weights are a separate download (§4.2). Without them `--config
-config_IFAN_16bit` still runs, because the architecture is identical and the 8-bit
-checkpoint loads into it; with only `IFAN.pytorch` you can still write a 16-bit result,
-which is the 8-bit model's correction carried at full input precision. Whether the
-16-bit-trained model deblurs differently is a separate question — but it is the smaller
-one. **16-bit input and output do not by themselves make the model deblur better;** what
-they buy is the precision to hand the result to a blend, and that is the requirement.
+  ```
+  WARNING    : IMG_1676_16.tiff holds 16-bit data but config_IFAN reads and writes 8-bit,
+                so the extra precision is discarded; drop --config to keep each file at
+                its own depth
+  ```
+
+- **Alpha.** Affinity's TIFF exports often carry an alpha channel. `IMREAD_UNCHANGED`
+  returns it as a fourth channel, and upstream's 16-bit read would reorder it into the
+  colour channels and corrupt the picture, so this runner drops alpha first — and says so,
+  because the result then has no transparency of its own.
+
+**16-bit input and output do not by themselves make the model deblur better.** What they
+buy is the precision to hand the result to a blend — which is the requirement, and is also
+why the 16-bit-trained weights matter less here than they look: nothing below depends on
+them.
 
 Blending sets that requirement, because a blend scales the layer's contribution down.
 Measured on a real 20.9-megapixel frame, compositing the deblurred result over the
@@ -414,12 +439,25 @@ than anywhere else. Measuring gradient strength directly across the tile lines s
 no elevation either. If you do ever see faint straight lines, raise `--overlap`
 (e.g. `384`) and re-check.
 
-The same run with `--config config_IFAN_16bit --ext tif` verifies the 16-bit path. Build
-a 16-bit copy of an 8-bit image by scaling every channel by exactly **257** (since
-257 × 255 = 65535): the 16-bit result, divided by 257, must then be **identical** to the
-8-bit result for the same image, because both normalise to the same values in [0, 1].
-Anything else means the read or write scaling is wrong. Including an alpha channel in
-that test file must not change the result by a single byte.
+The 16-bit path is verified the same way, and needs no options either. Build a 16-bit
+copy of an 8-bit image by scaling every channel by exactly **257** (since 257 × 255 =
+65535): the 16-bit result, divided by 257, must then be **identical** to the 8-bit result
+for the same image, because both normalise to the same values in [0, 1]. Anything else
+means the read or write scaling is wrong. Including an alpha channel in that test file
+must not change the result by a single byte.
+
+Two things are worth re-checking whenever `local_infer.py` changes:
+
+- **The 8-bit path is byte-identical.** Its output is what upstream users already had, so
+  it is compared as a file rather than by eye. Run the same 8-bit image through the
+  previous revision and the new one and compare the results with
+  `Get-FileHash <a>,<b> -Algorithm SHA256`. An 8-bit JPEG deblurred to PNG on
+  `demo/input/input_large.jpg` must keep coming out as `0894BB42 6EB24483 BECEB3B3
+  004B61BF 0653500D FDEF3FCC 3769BDA3 D7074F09`.
+- **Bit depth follows the file.** A folder holding one 8-bit JPEG and one 16-bit TIFF must
+  report `8-bit` on one line and `16-bit` on the other, loading `ckpt\IFAN.pytorch` for the
+  first and `ckpt\IFAN_16bit.pytorch` for the second, and leaving a `uint8` and a `uint16`
+  file on disk.
 
 ---
 
@@ -434,8 +472,9 @@ Not the network failing — it is the guard from §2. Either shrink the image, r
 the ceiling (`--max-pixels 200000000`), or remove it (`--max-pixels 0`). Each extra
 100 megapixels needs roughly 2 GB of host RAM and about 40 s on an RTX 3060.
 
-**`Checkpoint not found: ckpt\IFAN.pytorch`**
-The weights are missing — see §4.2.
+**`No checkpoint found in ...\ckpt`**
+Neither `IFAN.pytorch` nor `IFAN_16bit.pytorch` is present — see §4.2. A
+`Checkpoint not found: <path>` on its own means `--ckpt` named a file that is not there.
 
 **`Python environment not found`**
 `.venv` is missing or was moved away from the project root — see §4.1.
@@ -469,9 +508,10 @@ about DNG has probably never opened one. Name it directly (`-i photo.dng`) to tr
 then OpenCV sees only the TIFF container: the colour matrix, white balance and
 linearisation that make a DNG a DNG are skipped, and the runner says so on the console. A
 camera raw usually arrives as a single-channel colour-filter array rather than a picture,
-which it also warns about. A DNG can be read but not written, so the result needs
-`--ext tif` (or `png`); `--ext keep` is refused. Affinity can read a DNG but cannot write
-one, so a DNG is not available as an interchange format for this workflow in any case.
+which it also warns about. A DNG can be read but not written back out, so a DNG input
+produces a **TIFF** and the run says so, rather than stopping to ask for a flag it could
+have chosen itself. Affinity can read a DNG but cannot write one, so a DNG is not
+available as an interchange format for this workflow in any case.
 For a correct read `rawpy` (libraw) is installed in `.venv`, but for anything going into
 the deblurring pipeline, export a demosaiced TIFF or PNG instead.
 

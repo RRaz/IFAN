@@ -1,6 +1,10 @@
 # Driving IFAN from Affinity 3 — open question
 
-**Status:** not started · captured 2026-10-18
+**Status:** add-on, not started, and deliberately not part of the current work · captured 2026-10-18
+
+This is kept separate on purpose. The 16-bit path (`LOCAL_SETUP.md` §5.6) is finished and
+tested on its own first, so that the two are not being debugged at the same time. Nothing
+here blocks anything there, and nothing there needs reading in order to use this runner.
 
 An idea to pick up later: can Affinity 3 (by Canva) hand an image to this project
 and take the deblurred result back — as a *layer*, not a flattened file?
@@ -79,10 +83,11 @@ Second priority, **after** the interface is working: 16 bits per channel (48-bit
 colour), matched to Affinity's 16-bit mode. The findings below make this a much
 smaller job than it sounds.
 
-**Implemented on 2026-10-18** — see `LOCAL_SETUP.md` §5.6. `local_infer.py` now takes
-`--config config_IFAN_16bit` (with its matching mode, `IFAN_16bit`), writes at the
-config's bit depth and offers `--ext tif`, plus guards for the three traps listed
-further down. Verified against the 8-bit result: a 16-bit file built by scaling an
+**Implemented on 2026-10-18** — see `LOCAL_SETUP.md` §5.6. Bit depth is now taken from each
+file, with the matching weights and container chosen to suit, so a 16-bit input needs no
+arguments at all; `--config` remains as an override for forcing one mode, `IFAN_16bit` is
+the mode behind it, and the traps listed further down are guarded. Verified against the
+8-bit result: a 16-bit file built by scaling an
 8-bit image by exactly 257 yields a 16-bit result that divides back by 257 to a
 **byte-identical** picture, and the same file carrying an alpha channel gives
 byte-identical output as well.
@@ -121,7 +126,11 @@ What is still missing:
   shallowest layer. Measured on a real 20.9-megapixel frame, an 8-bit layer leaves 33
   levels for the correction at 10% opacity and 94 at 30%, where a 16-bit layer leaves
   5,706 and 14,932. None of those numbers involve the 16-bit weights, so the part that
-  matters most is already working.
+  matters most was working before the weights arrived.
+
+  Both checkpoints are now local (`ckpt\IFAN.pytorch` and `ckpt\IFAN_16bit.pytorch`), so
+  the remaining question — whether the 16-bit-trained model's correction differs visibly
+  from the 8-bit model's — can be answered by running the same frame through both.
 
 - **A genuine 16-bit image to try it on.** Supplied: `testfolder/IMG_1676_16.tiff`,
   4578 x 4571, holding **65,477 distinct levels** — not the 256 that an 8-bit picture

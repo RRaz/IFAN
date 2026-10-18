@@ -27,6 +27,9 @@ rem  No options are needed.  Large images are tiled automatically, results are
 rem  always full resolution, and an image past the 100 megapixel ceiling is
 rem  reported instead of being shrunk.
 rem
+rem  Bit depth needs no setting either: a 16-bit TIFF comes back 16-bit, an 8-bit
+rem  JPEG stays 8-bit, and a folder holding both is handled in one run.
+rem
 rem  Any argument starting with "-" is passed straight to local_infer.py and
 rem  applied to every run:
 rem      --dest output           write to the project "output" folder instead
@@ -63,9 +66,9 @@ if not exist "%PY%" (
     echo         See section 4 of LOCAL_SETUP.md.
     goto :end
 )
-if not exist "%HERE%ckpt\IFAN.pytorch" (
-    echo [ERROR] Pretrained checkpoint not found:
-    echo         %HERE%ckpt\IFAN.pytorch
+if not exist "%HERE%ckpt\IFAN.pytorch" if not exist "%HERE%ckpt\IFAN_16bit.pytorch" (
+    echo [ERROR] No pretrained checkpoint found in:
+    echo         %HERE%ckpt
     echo         See section 4.2 of LOCAL_SETUP.md.
     goto :end
 )
