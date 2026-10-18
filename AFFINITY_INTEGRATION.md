@@ -149,15 +149,25 @@ supplementary material).
 A second project of mine targets the same audience: **`RRaz/DepthAnythingAC`**, a
 fork of *Depth Anything At Any Condition*. I run it locally through a browser
 interface, and it writes **16-bit greyscale** results to a folder, arranged
-similarly to this repo's `deblurred/` output. The repo carries a browser tool at
-`tools/infer.py`.
+similarly to this repo's `deblurred/` output.
+
+**The public repo is not the working copy.** What actually runs is a version
+modified on this machine for personal use, and the GitHub fork may lag behind it.
+Anything described from the repo — including the browser tool at `tools/infer.py` —
+should be checked against the local tree before being relied on.
 
 Notes:
 
+- **GPU is off by design on the local copy.** As it stands it works only when the
+  GPU is not used; the failure looks like hard-referenced driver versions rather
+  than anything wrong with the model. It has not needed fixing, because the CPU
+  path is *faster* than the cloud version.
 - A depth map is single-channel, so 16-bit greyscale is the most it can use — the
   48-bit question above belongs to the colour project, not this one.
 - Both projects produce full-resolution, same-dimension results written beside the
   source, so one integration pattern could serve both.
+- **Integrate against the local copy**, not the repo. For this project the running
+  code on the machine is the source of truth.
 - GitHub detects **no licence** in `RRaz/DepthAnythingAC`. Worth checking the
   parent before publishing more there — the same attribution question that applied
   to this fork, but with even less to go on.
