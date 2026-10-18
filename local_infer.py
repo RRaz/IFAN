@@ -82,6 +82,10 @@ CONFIGS = {
 # Containers that can hold more than 8 bits per channel.  JPEG cannot, which is why
 # 16-bit output cannot simply keep the input extension the way the default does.
 DEEP_EXTS = ('.tif', '.tiff', '.png')
+# Extensions that are always 8 bits per channel, so their depth need never be probed.
+# Anything else gets opened and asked -- a DNG included, which can be deep but is absent
+# from IMAGE_EXTS because it cannot be written back out.
+SHALLOW_EXTS = ('.jpg', '.jpeg', '.bmp', '.webp')
 # OpenCV gives the TIFF Deflate tag no name; 8 is COMPRESSION_ADOBE_DEFLATE, the widely
 # supported identifier.  Its deprecated twin, 32946, writes the same bytes but makes
 # libtiff warn on every write.
@@ -266,10 +270,10 @@ def input_bit_depth(path):
     """Bits per channel stored in `path`, or None if it cannot be read.
 
     Formats that cannot hold more than 8 bits are answered from the extension without
-    opening the file; the rest are probed.  `read_input` can also answer this while
+    opening the file; everything else is probed.  `read_input` can also answer this while
     reading for real, and prefers to.
     """
-    if os.path.splitext(path)[1].lower() not in DEEP_EXTS:
+    if os.path.splitext(path)[1].lower() in SHALLOW_EXTS:
         return 8
     probe = cv2.imread(path, cv2.IMREAD_UNCHANGED)
     if probe is None:
@@ -300,8 +304,8 @@ def output_extension(input_ext, requested):
 def container_error(bits, output_ext):
     """Why `output_ext` cannot hold `bits` bits per channel, or None if it can."""
     if bits > 8 and output_ext not in DEEP_EXTS:
-        return ('{} cannot hold {}-bit output; use --ext tif (or png), or drop --config '
-                'to let each file keep its own depth'
+        return ('{} cannot hold {}-bit output; use --ext tif (or png), or --config '
+                'config_IFAN if 8-bit is what you want'
                 .format(output_ext or 'that format', bits))
     return None
 
@@ -387,10 +391,10 @@ def read_input(path, config=None):
 
     raw = None
     if config is None:
-        # The file's own depth decides.  For a format that cannot be deep this needs no
+        # The file's own depth decides.  For a format that is always 8 bits this needs no
         # read at all; otherwise the read below doubles as the probe, so nothing is read
         # twice.
-        if ext not in DEEP_EXTS:
+        if ext in SHALLOW_EXTS:
             bits = 8
         else:
             raw = cv2.imread(path, cv2.IMREAD_UNCHANGED)

@@ -510,7 +510,8 @@ linearisation that make a DNG a DNG are skipped, and the runner says so on the c
 camera raw usually arrives as a single-channel colour-filter array rather than a picture,
 which it also warns about. A DNG can be read but not written back out, so a DNG input
 produces a **TIFF** and the run says so, rather than stopping to ask for a flag it could
-have chosen itself. Affinity can read a DNG but cannot write one, so a DNG is not
+have chosen itself. Its depth is probed like any other file, so a 16-bit raw comes back
+16-bit. Affinity can read a DNG but cannot write one, so a DNG is not
 available as an interchange format for this workflow in any case.
 For a correct read `rawpy` (libraw) is installed in `.venv`, but for anything going into
 the deblurring pipeline, export a demosaiced TIFF or PNG instead.
