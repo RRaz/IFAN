@@ -22,3 +22,8 @@ __pycache__/
 
 # Scratch folder for test images: large, and not part of the project
 /testfolder/
+
+# Staging area for assets being considered for the repository: files land here so
+# nothing is committed before it has been looked at.  Anything placed here is
+# ignored; only what is deliberately moved into demo/ or assets/ is tracked.
+/_incoming/
