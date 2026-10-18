@@ -78,26 +78,33 @@ State of play in `local_infer.py`:
 
 - The pipeline is **float32 throughout** — the network runs on float patches and
   the tile accumulator is `float32`.
-- **16-bit input already works.** `data_loader/utils.py::read_frame` branches on
-  `norm_val`: when it equals `2**16-1` it reads with `cv2.imread(path, -1)`
-  (`IMREAD_UNCHANGED`, which preserves 16-bit depth) and divides by 65535.
-  `local_infer.py` already passes `config.norm_val` through, so nothing needs
-  changing on the way in.
+- **16-bit input is supported upstream.** `data_loader/utils.py::read_frame`
+  branches on `norm_val`: when it equals `2**16-1` it reads with
+  `cv2.imread(path, -1)` (`IMREAD_UNCHANGED`, which preserves 16-bit depth) and
+  divides by 65535. Otherwise it reads with `IMREAD_COLOR`, which **downconverts to
+  8-bit**.
+- **That branch is unreachable from the current CLI.** `local_infer.py` hard-codes
+  its config — `get_config('IFAN_CVPR2021', 'IFAN', 'config_IFAN')`, which is
+  `in_bit = 8`, `norm_val = 255`. There is a `--ckpt` flag (default
+  `ckpt/IFAN.pytorch`) but no `--config` flag, so pointing `--ckpt` at the 16-bit
+  weights would still read 8-bit input and quietly flatten it.
 - **Only the final write is 8-bit.** One line quantises the result:
   `output = (np.flip(blended, 2) * 255).astype(np.uint8)`.
 - `--ext` currently offers only `keep`, `png` and `jpg`.
 
 What a 48-bit path needs:
 
-1. Keep the result at 16-bit on write — multiply by 65535 and cast to `uint16`
+1. Make the config selectable — a `--config` flag, or infer it from the checkpoint
+   name — so `norm_val` can become 65535 and `read_frame` takes its 16-bit branch.
+2. Keep the result at 16-bit on write — multiply by 65535 and cast to `uint16`
    instead of 255 / `uint8`.
-2. Write a container that can hold 16-bit. **JPEG cannot** — it is 8-bit only, so
+3. Write a container that can hold 16-bit. **JPEG cannot** — it is 8-bit only, so
    `--ext jpg` can never carry 48-bit. TIFF is the natural interchange for an
    Affinity layer round trip; 16-bit PNG also works.
-3. Use the **16-bit trained model**, not the 8-bit one: `configs/config_IFAN_16bit.py`
-   (`in_bit = 16`, `norm_val = 65535`, same `N = 17` and `refine_val = 8`) with
-   `ckpt/IFAN_16bit.pytorch`. Feeding 16-bit data to the 8-bit model would be the
-   wrong pairing.
+4. Use the **16-bit trained model**, not the 8-bit one:
+   `configs/config_IFAN_16bit.py` (`in_bit = 16`, `norm_val = 65535`, same `N = 17`
+   and `refine_val = 8`) with `ckpt/IFAN_16bit.pytorch`. Feeding 16-bit data to the
+   8-bit model would be the wrong pairing.
 
 The 16-bit weights are not in this repo — they come from the same upstream download
 as the 8-bit ones ("Our model trained with 16 bit images", Table 1 of the
