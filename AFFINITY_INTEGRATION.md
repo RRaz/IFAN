@@ -125,24 +125,62 @@ supplementary material).
   name are for *Affinity CRM* (`affinity.co`), which has nothing to do with the
   design suite. Anything asking for an `sk-...` API key is the CRM one.
 
-## Next steps
+## Planned future work
 
-1. Enable the MCP server in Affinity's Settings (3.2 or later) and let it restart.
-2. Dump the SDK docs locally (`node extract_docs.js`) and search them for *file*,
-   *path*, *process*, *export* and *place*/*import*.
-3. Enumerate the live tool list with MCP Inspector, looking specifically for:
-   export document, place/import image as layer, and any process execution.
-4. Register the server with opencode, proxying to stdio if SSE misbehaves.
-5. **If export and place both exist:** no Affinity script is needed. The agent
-   exports the active document, runs `local_infer.py` on it, and places the result
-   back as a layer — landing straight in the mask-and-blend workflow.
-6. **If they do not:** the manual path already works today (export from Affinity →
-   run `run_infer.bat` or `local_infer.py` → place the `_db` file as a layer).
-   Integration would then only save a few clicks.
-7. Only once the round trip works: move to 48-bit output (see the bit depth section
-   above). Mind the whole chain, not just the tool — if Affinity exports an 8-bit
-   intermediate on the way out, the 16-bit work downstream is wasted, so the export
-   format has to be 16-bit too.
+**Sequence as of 2026-10-18** — to be taken in order, unless expedience says
+otherwise:
+
+1. **Enable an interface.** Turn on the MCP server in Affinity's Settings (3.2 or
+   later; Affinity restarts), or take the more general JavaScript scripting route.
+   The MCP server is the smaller step and is what makes the interface inspectable, so
+   it goes first — see "Inspecting the interface" below.
+2. **Make IFAN talk to the interface.** What this involves depends on the answer to
+   "The open question" above:
+   - **If export and place both exist:** no Affinity script is needed. The agent
+     exports the active document, runs `local_infer.py` on it, and places the result
+     back as a layer — landing straight in the mask-and-blend workflow.
+   - **If they do not:** the manual path already works today (export from Affinity →
+     run `run_infer.bat` or `local_infer.py` → place the `_db` file as a layer).
+     Integration would then only save a few clicks.
+3. **Try the 16-bit version.** See the bit depth section above for what it needs, and
+   "On the memory concern" below for why it should fit.
+4. **Make the depth map program work with Affinity.** The same pattern as step 2, but
+   aimed at the **local** copy of that project rather than the repo — see Related work.
+
+Steps 3 and 4 may swap, whichever proves quicker to land.
+
+### Inspecting the interface (step 1)
+
+- Dump the SDK docs locally (`node extract_docs.js`) and search them for *file*,
+  *path*, *process*, *export* and *place*/*import*.
+- Enumerate the live tool list with MCP Inspector, looking specifically for: export
+  document, place/import image as layer, and any process execution.
+- Register the server with opencode, proxying to stdio if SSE misbehaves.
+
+### On the memory concern (step 3)
+
+Bit depth does **not** change GPU memory. `in_bit` only affects how the input file is
+read and what it is divided by (`norm_val`: 255 against 65535); the network runs in
+`float32` either way. `config_IFAN.py` and `config_IFAN_16bit.py` are architecturally
+identical — `N = 17`, `ch = 32`, `ks = 3`, `res_num = 2`, `refine_val = 8` — so the
+15,232-channel tensor that sets the cost (`models/archs/IFAN.py`, `self.F`) is the
+same size in both. The measured 1884 MiB peak and the ~1.8 GB per megapixel
+whole-image figure apply unchanged. Image size is what costs memory, and tiling
+already handles that.
+
+Three things to watch when the 16-bit path is wired up:
+
+- **Config and file bit depth must match, in both directions.** The 16-bit branch is
+  selected by `norm_val == 65535`, so an 8-bit file read by the 16-bit config gets
+  divided by 65535 and comes back almost black. The reverse mismatch is the silent
+  flattening already noted.
+- **Alpha breaks the 16-bit read.** It uses `cv2.imread(path, -1)`
+  (`IMREAD_UNCHANGED`), which returns the file as stored — so a 16-bit image carrying
+  an alpha channel arrives as 4 channels, and `read_frame`'s `frame[...,::-1]` then
+  reorders them wrongly. Affinity TIFF exports often carry alpha, so export without it
+  or handle the channel count.
+- Model and config must be switched together — the 16-bit weights with the 8-bit
+  config would mis-scale silently.
 
 ## Related work — the 16-bit depth map project
 
