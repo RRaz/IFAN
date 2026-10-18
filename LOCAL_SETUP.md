@@ -124,8 +124,15 @@ copy ckpt_tmp\IFAN.pytorch ckpt\IFAN.pytorch
 ```
 
 The archive also contains `IFAN_8`, `IFAN_26`, `IFAN_35`, `IFAN_44`, `IFAN_dual`
-and `IFAN_16bit`. Each needs its matching config (`config_IFAN_8`, etc.), which
-the repo already provides. Delete the rest if you do not need them.
+and `IFAN_16bit`. Each needs its matching config (`config_IFAN_8`, etc.), which the
+repo already provides, but `local_infer.py` only knows the two that matter here:
+
+```bat
+copy ckpt_tmp\IFAN_16bit.pytorch ckpt\IFAN_16bit.pytorch   REM optional; see §5.6
+```
+
+Keep `IFAN.pytorch` (8-bit) and, if you want 48-bit output, `IFAN_16bit.pytorch`.
+Delete the rest if you do not need them.
 
 ---
 
@@ -193,7 +200,8 @@ a destination is named.
 | `--overlap` | `256` | Feather width between neighbouring tiles |
 | `--recursive`, `-r` | off | Recurse into subfolders, preserving the folder structure |
 | `--cpu` | off | Force CPU even when a GPU is present |
-| `--ext` | `keep` | Output format: `keep`, `png` or `jpg` |
+| `--config` | `config_IFAN` | `config_IFAN` (8-bit) or `config_IFAN_16bit` (16-bit; see §5.6) |
+| `--ext` | `keep` | Output format: `keep`, `png`, `jpg` or `tif` |
 
 `--tile` and `--overlap` are rounded down to a multiple of 8 (the network
 downsamples by 8), and `--overlap` is capped at half the tile size.
@@ -250,6 +258,51 @@ Done: 3 of 3 image(s) in 2.8s (average 0.95s)
 - **Results are never fed back in as inputs**, so a second run over the same folder
   cannot grow it (§5.4). It does redo the work, overwriting the earlier results.
 - Order is deterministic (sorted by path), so a re-run processes the same sequence.
+
+### 5.6 16-bit (48-bit colour) output
+
+By default `local_infer.py` reads and writes **8 bits per channel**, which is what the
+published `IFAN.pytorch` weights were trained on. For 48-bit colour — 16 bits each in
+red, green and blue, matching Affinity's 16-bit mode — select the 16-bit config:
+
+```bat
+.venv\Scripts\python.exe local_infer.py -i D:\photo.tif --config config_IFAN_16bit --ext tif
+```
+
+Three things have to line up, and all three are checked:
+
+- **Config and file bit depth must match, in both directions.** `config_IFAN_16bit`
+  divides by 65535, so feeding it an 8-bit file would produce something close to
+  black; that is refused with a message instead of being written out. The other way
+  round, the 8-bit config quietly discards the extra precision of a 16-bit file, so it
+  says so:
+
+  ```
+  WARNING    : photo.tif holds 16-bit data but this config reads 8-bit, so the extra
+                precision is discarded; pass --config config_IFAN_16bit to keep it
+  ```
+
+- **The container must be able to hold 16 bits.** JPEG cannot, and neither can WebP, so
+  `--ext tif` (or `png`) is required and `--ext jpg` is refused. TIFF is the natural
+  interchange for Affinity. For the same reason `--ext keep` is refused on a folder of
+  JPEGs, whose outputs would inherit the `.jpg` extension.
+
+- **Alpha is handled.** Affinity's TIFF exports often carry an alpha channel.
+  `IMREAD_UNCHANGED` returns it as a fourth channel, and upstream's 16-bit read would
+  reorder it into the colour channels and corrupt the picture, so this runner drops
+  alpha first.
+
+The 16-bit weights are a separate download (§4.2). Without them `--config
+config_IFAN_16bit` still runs, because the architecture is identical and the 8-bit
+checkpoint loads into it — but that only exercises the plumbing, not 16-bit
+deblurring. **16-bit input and output do not by themselves improve a result;** the
+model has to have been trained at that precision too. What the 16-bit path buys you is
+the headroom to take the result into Affinity and combine it as a layer without an
+8-bit round trip quantising it first.
+
+Bit depth does **not** change GPU memory: the network works in `float32` either way and
+the two configs are architecturally the same, so the ~1.9 GB tiled peak in §6 applies
+unchanged.
 
 ---
 
@@ -330,6 +383,13 @@ than 8 levels — and those differences are *less* likely to fall on a tile boun
 than anywhere else. Measuring gradient strength directly across the tile lines shows
 no elevation either. If you do ever see faint straight lines, raise `--overlap`
 (e.g. `384`) and re-check.
+
+The same run with `--config config_IFAN_16bit --ext tif` verifies the 16-bit path. Build
+a 16-bit copy of an 8-bit image by scaling every channel by exactly **257** (since
+257 × 255 = 65535): the 16-bit result, divided by 257, must then be **identical** to the
+8-bit result for the same image, because both normalise to the same values in [0, 1].
+Anything else means the read or write scaling is wrong. Including an alpha channel in
+that test file must not change the result by a single byte.
 
 ---
 

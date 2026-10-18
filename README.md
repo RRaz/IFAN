@@ -44,7 +44,7 @@ Start with **[`LOCAL_SETUP.md`](LOCAL_SETUP.md)** for setup, usage and verificat
 |---|---|
 | `predict.py` | `max_side` raised `1920` → `5760` (only affects the Cog/Replicate path) |
 | `README.md` | this notice |
-| `local_infer.py` | **new** — standalone tiled batch runner |
+| `local_infer.py` | **new** — standalone tiled batch runner, 8 or 16 bits per channel |
 | `run_infer.bat` | **new** — Windows drop-zone wrapper |
 | `LOCAL_SETUP.md` | **new** — setup, usage, verification |
 | `.gitignore` | **new** — excludes `.venv/`, `ckpt/` and generated output |

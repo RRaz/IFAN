@@ -39,7 +39,8 @@ import cv2
 import numpy as np
 import torch
 
-from configs.config_IFAN import get_config
+from configs.config_IFAN import get_config as get_config_8bit
+from configs.config_IFAN_16bit import get_config as get_config_16bit
 from data_loader.utils import read_frame, refine_image
 from models.archs.IFAN import Network
 
@@ -50,7 +51,20 @@ DEFAULT_MAX_PIXELS = 100_000_000   # ceiling, refused with a message naming the 
 DEFAULT_DEST = 'both'              # 'output', 'subfolder', 'suffix' or 'both'
 DEFAULT_SUBFOLDER = 'deblurred'    # folder created beside the inputs
 DEFAULT_SUFFIX = '_db'             # appended to each output file name
+DEFAULT_CONFIG = 'config_IFAN'     # 8-bit in and out, the published weights
 IMAGE_EXTS = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.webp')
+
+# Configurations this runner knows how to pair with a checkpoint: name -> (mode for
+# get_config, loader).  The two differ only in `in_bit` (8 against 16) and in the data
+# their weights were trained on; the architecture is identical, so either checkpoint
+# loads into either configuration.
+CONFIGS = {
+    'config_IFAN':       ('IFAN',       get_config_8bit),
+    'config_IFAN_16bit': ('IFAN_16bit', get_config_16bit),
+}
+# Containers that can hold more than 8 bits per channel.  JPEG cannot, which is why
+# 16-bit output cannot simply keep the input extension the way the default does.
+DEEP_EXTS = ('.tif', '.tiff', '.png')
 
 
 def find_images(root, recursive):
@@ -227,9 +241,62 @@ def deblur_image(net, config, device, image, tile, overlap):
     return accum / np.maximum(weight_sum, 1e-6), len(ys) * len(xs)
 
 
+def input_bit_depth(path):
+    """Bits per channel in `path`, or None if it cannot be read.
+
+    Formats that cannot hold more than 8 bits are answered without opening the file;
+    the rest are probed.  This only ever feeds a warning -- it never changes how a
+    file is read.
+    """
+    if os.path.splitext(path)[1].lower() not in DEEP_EXTS:
+        return 8
+    probe = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+    if probe is None:
+        return None
+    return probe.dtype.itemsize * 8
+
+
+def read_input(path, config):
+    """Read `path` as (1, h, w, 3) float RGB in [0, 1].
+
+    The 8-bit path is upstream's `read_frame`, untouched.  The 16-bit path reads at
+    native depth, which is what upstream's 16-bit branch does too, except that it
+    drops an alpha channel first: upstream reverses the last axis, which would turn a
+    four-channel BGRA image into ARGB and quietly corrupt it, and Affinity TIFF
+    exports commonly carry alpha.
+    """
+    if getattr(config, 'in_bit', 8) != 16:
+        return read_frame(path, config.norm_val, None)
+
+    raw = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+    if raw is None:
+        raise RuntimeError('could not read {}'.format(path))
+    if raw.dtype != np.uint16:
+        raise RuntimeError(
+            '{} holds {}-bit data but this config reads 16-bit, and dividing it by '
+            '65535 would bring it back almost black; use --config config_IFAN for '
+            '8-bit files'.format(path, raw.dtype.itemsize * 8))
+
+    if raw.ndim == 3 and raw.shape[2] == 4:
+        raw = raw[:, :, :3]                        # drop alpha before reversing
+    if raw.ndim == 2:
+        raw = cv2.cvtColor(raw, cv2.COLOR_GRAY2RGB)
+    else:
+        raw = raw[:, :, ::-1]                      # BGR -> RGB
+
+    return np.expand_dims(raw / 65535.0, axis=0)
+
+
+def to_output(blended, in_bit):
+    """(h, w, 3) float RGB in [0, 1] -> BGR array at the config's bit depth."""
+    scale = (2 ** in_bit) - 1
+    dtype = np.uint16 if in_bit == 16 else np.uint8
+    return (np.flip(blended, 2) * scale).astype(dtype)   # RGB -> BGR for OpenCV
+
+
 def process(net, config, device, path, output_path, max_side, tile, overlap, max_pixels):
     """Deblur a single image and write it to `output_path`."""
-    frame = read_frame(path, config.norm_val, None)  # (1, h, w, 3) float32 RGB in [0, 1]
+    frame = read_input(path, config)   # (1, h, w, 3) float RGB in [0, 1]
     _, height, width, _ = frame.shape
 
     note = ''
@@ -261,7 +328,7 @@ def process(net, config, device, path, output_path, max_side, tile, overlap, max
     blended, tiles = deblur_image(net, config, device, image, tile, overlap)
     elapsed = time.time() - started
 
-    output = (np.flip(blended, 2) * 255).astype(np.uint8)  # RGB -> BGR for OpenCV
+    output = to_output(blended, getattr(config, 'in_bit', 8))   # RGB -> BGR
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     if not cv2.imwrite(output_path, output):
@@ -306,7 +373,11 @@ def main():
     parser.add_argument('--recursive', '-r', action='store_true',
                         help='recurse into subfolders, keeping the folder structure')
     parser.add_argument('--cpu', action='store_true', help='run on CPU even if a GPU is available')
-    parser.add_argument('--ext', default='keep', choices=['keep', 'png', 'jpg'],
+    parser.add_argument('--config', default=DEFAULT_CONFIG, choices=list(CONFIGS),
+                        help='model configuration: config_IFAN (default) reads and writes '
+                             '8-bit; config_IFAN_16bit reads 16-bit input and writes 16-bit '
+                             'output, which needs --ext tif or png')
+    parser.add_argument('--ext', default='keep', choices=['keep', 'png', 'jpg', 'tif'],
                         help='output format; "keep" preserves each input extension (default)')
     args = parser.parse_args()
 
@@ -323,7 +394,8 @@ def main():
                  .format(args.ckpt))
 
     device = torch.device('cpu') if args.cpu or not torch.cuda.is_available() else torch.device('cuda')
-    config = get_config('IFAN_CVPR2021', 'IFAN', 'config_IFAN')
+    mode, load_config = CONFIGS[args.config]
+    config = load_config('IFAN_CVPR2021', mode, args.config)
     config.network = 'IFAN'
     config.device = str(device)
 
@@ -335,6 +407,7 @@ def main():
 
     print('device     : {}{}'.format(device, '' if device.type == 'cpu' else
                                      ' ({})'.format(torch.cuda.get_device_name(0))))
+    print('model      : {} ({}-bit in and out)'.format(args.config, config.in_bit))
     print('max side   : {}'.format('unlimited' if not args.max_side else args.max_side))
     print('tiling     : {}'.format('disabled' if tile <= 0 else
                                    '{} px tiles, {} px overlap'.format(tile, overlap)))
@@ -371,6 +444,28 @@ def main():
                   .format(skipped, args.input))
             return
         sys.exit('No images found under {}'.format(args.input))
+
+    # 16-bit results need a container that can hold them; JPEG and WebP cannot.
+    if getattr(config, 'in_bit', 8) > 8:
+        if args.ext != 'keep' and '.' + args.ext not in DEEP_EXTS:
+            sys.exit('--ext {} cannot hold {}-bit output.  Use --ext tif (or png), or run '
+                     'with --config config_IFAN for 8-bit results.'
+                     .format(args.ext, config.in_bit))
+        if args.ext == 'keep':
+            blocked = [p for p in images
+                       if os.path.splitext(p)[1].lower() not in DEEP_EXTS]
+            if blocked:
+                sys.exit('{} of {} input(s) end in a format that cannot hold {}-bit output '
+                         '({}).  Use --ext tif, or run with --config config_IFAN.'
+                         .format(len(blocked), len(images), config.in_bit,
+                                 os.path.basename(blocked[0])))
+    else:
+        probe = next((p for p in images
+                      if os.path.splitext(p)[1].lower() in DEEP_EXTS), None)
+        if probe and (input_bit_depth(probe) or 0) > 8:
+            print('WARNING    : {} holds 16-bit data but this config reads 8-bit, so the '
+                  'extra precision is discarded; pass --config config_IFAN_16bit to keep '
+                  'it'.format(os.path.basename(probe)))
 
     if args.dest == 'output':
         destination = os.path.abspath(args.output)

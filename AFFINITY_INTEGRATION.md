@@ -74,41 +74,44 @@ Second priority, **after** the interface is working: 16 bits per channel (48-bit
 colour), matched to Affinity's 16-bit mode. The findings below make this a much
 smaller job than it sounds.
 
-State of play in `local_infer.py`:
+**Implemented on 2026-10-18** — see `LOCAL_SETUP.md` §5.6. `local_infer.py` now takes
+`--config config_IFAN_16bit` (with its matching mode, `IFAN_16bit`), writes at the
+config's bit depth and offers `--ext tif`, plus guards for the three traps listed
+further down. Verified against the 8-bit result: a 16-bit file built by scaling an
+8-bit image by exactly 257 yields a 16-bit result that divides back by 257 to a
+**byte-identical** picture, and the same file carrying an alpha channel gives
+byte-identical output as well.
 
-- The pipeline is **float32 throughout** — the network runs on float patches and
-  the tile accumulator is `float32`.
-- **16-bit input is supported upstream.** `data_loader/utils.py::read_frame`
+How it works, for reference:
+
+- The whole pipeline is **float32** — the network runs on float patches and the tile
+  accumulator is `float32` — so nothing is lost in the middle.
+- **16-bit input is already supported upstream.** `data_loader/utils.py::read_frame`
   branches on `norm_val`: when it equals `2**16-1` it reads with
   `cv2.imread(path, -1)` (`IMREAD_UNCHANGED`, which preserves 16-bit depth) and
   divides by 65535. Otherwise it reads with `IMREAD_COLOR`, which **downconverts to
   8-bit**.
-- **That branch is unreachable from the current CLI.** `local_infer.py` hard-codes
-  its config — `get_config('IFAN_CVPR2021', 'IFAN', 'config_IFAN')`, which is
-  `in_bit = 8`, `norm_val = 255`. There is a `--ckpt` flag (default
-  `ckpt/IFAN.pytorch`) but no `--config` flag, so pointing `--ckpt` at the 16-bit
-  weights would still read 8-bit input and quietly flatten it.
-- **Only the final write is 8-bit.** One line quantises the result:
-  `output = (np.flip(blended, 2) * 255).astype(np.uint8)`.
-- `--ext` currently offers only `keep`, `png` and `jpg`.
+- `local_infer.py` now selects the config by name, mapping each `--config` value to
+  that config's own `get_config` and mode. The 8-bit path still calls `read_frame`
+  unchanged, and its output is byte-for-byte what it was before the change.
+- The 16-bit path reads with `IMREAD_UNCHANGED` itself, so that it can drop an alpha
+  channel before the channel reversal — see the traps below.
+- The write is one line: scale by `2 ** in_bit - 1`, cast to `uint16` for the 16-bit
+  config and `uint8` otherwise. Same code, different divisor.
+- `--ext` gained `tif` alongside `keep`, `png` and `jpg`.
 
-What a 48-bit path needs:
+What is still missing:
 
-1. Make the config selectable — a `--config` flag, or infer it from the checkpoint
-   name — so `norm_val` can become 65535 and `read_frame` takes its 16-bit branch.
-2. Keep the result at 16-bit on write — multiply by 65535 and cast to `uint16`
-   instead of 255 / `uint8`.
-3. Write a container that can hold 16-bit. **JPEG cannot** — it is 8-bit only, so
-   `--ext jpg` can never carry 48-bit. TIFF is the natural interchange for an
-   Affinity layer round trip; 16-bit PNG also works.
-4. Use the **16-bit trained model**, not the 8-bit one:
-   `configs/config_IFAN_16bit.py` (`in_bit = 16`, `norm_val = 65535`, same `N = 17`
-   and `refine_val = 8`) with `ckpt/IFAN_16bit.pytorch`. Feeding 16-bit data to the
-   8-bit model would be the wrong pairing.
-
-The 16-bit weights are not in this repo — they come from the same upstream download
-as the 8-bit ones ("Our model trained with 16 bit images", Table 1 of the
-supplementary material).
+- **The 16-bit trained model.** `configs/config_IFAN_16bit.py` (`in_bit = 16`,
+  `norm_val = 65535`, same `N = 17` and `refine_val = 8`) with
+  `ckpt/IFAN_16bit.pytorch`. The two architectures are identical, so the 8-bit
+  checkpoint loads into the 16-bit config and the plumbing can be exercised without
+  it — but the *quality* claim needs weights trained at that precision. They are not
+  in this repo; they come from the same upstream download as the 8-bit ones ("Our
+  model trained with 16 bit images", Table 1 of the supplementary material).
+- **A genuine 16-bit image to try it on.** An 8-bit JPEG re-saved as a 16-bit TIFF
+  exercises the plumbing but proves nothing about quality, since the extra precision
+  was never there to begin with.
 
 ## Environment check at capture time
 
@@ -142,8 +145,10 @@ otherwise:
    - **If they do not:** the manual path already works today (export from Affinity →
      run `run_infer.bat` or `local_infer.py` → place the `_db` file as a layer).
      Integration would then only save a few clicks.
-3. **Try the 16-bit version.** See the bit depth section above for what it needs, and
-   "On the memory concern" below for why it should fit.
+3. **Try the 16-bit version.** The runner side is done — see the bit depth section
+   above. What remains is dropping in `ckpt/IFAN_16bit.pytorch` and trying a genuine
+   16-bit image on it. None of that needs Affinity, so it can run in parallel with
+   steps 1 and 2; see "On the memory concern" below for why it fits.
 4. **Make the depth map program work with Affinity.** The same pattern as step 2, but
    aimed at the **local** copy of that project rather than the repo — see Related work.
 
@@ -168,19 +173,21 @@ same size in both. The measured 1884 MiB peak and the ~1.8 GB per megapixel
 whole-image figure apply unchanged. Image size is what costs memory, and tiling
 already handles that.
 
-Three things to watch when the 16-bit path is wired up:
+The three traps that shaped the 16-bit path are now handled in `local_infer.py`, and
+are recorded here because they are what the code is defending against:
 
 - **Config and file bit depth must match, in both directions.** The 16-bit branch is
-  selected by `norm_val == 65535`, so an 8-bit file read by the 16-bit config gets
-  divided by 65535 and comes back almost black. The reverse mismatch is the silent
-  flattening already noted.
-- **Alpha breaks the 16-bit read.** It uses `cv2.imread(path, -1)`
-  (`IMREAD_UNCHANGED`), which returns the file as stored — so a 16-bit image carrying
-  an alpha channel arrives as 4 channels, and `read_frame`'s `frame[...,::-1]` then
-  reorders them wrongly. Affinity TIFF exports often carry alpha, so export without it
-  or handle the channel count.
-- Model and config must be switched together — the 16-bit weights with the 8-bit
-  config would mis-scale silently.
+  selected by `norm_val == 65535`, so an 8-bit file read by the 16-bit config would
+  be divided by 65535 and come back almost black; the runner now refuses that with a
+  message naming the fix. The reverse mismatch is the silent flattening already
+  noted, and the runner warns about it once per run.
+- **Alpha breaks the 16-bit read.** `cv2.imread(path, -1)` (`IMREAD_UNCHANGED`)
+  returns the file as stored, so a 16-bit image carrying an alpha channel arrives as
+  4 channels and `read_frame`'s `frame[...,::-1]` then reorders them wrongly. The
+  16-bit path drops alpha before the reversal instead, which is testable: the same
+  image with and without alpha now produces byte-identical output.
+- Model and config must be switched together — selecting `--config
+  config_IFAN_16bit` switches both, so they cannot drift apart by accident.
 
 ## Related work — the 16-bit depth map project
 
