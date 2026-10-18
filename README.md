@@ -50,6 +50,7 @@ Start with **[`LOCAL_SETUP.md`](LOCAL_SETUP.md)** for setup, usage and verificat
 | `.gitignore` | **new** — excludes `.venv/`, `ckpt/` and generated output |
 | `input/README.txt` | **new** — drop-zone instructions |
 | `demo/input/input_large.jpg` | **new** — 20.7 Mpx sample that exercises tiling |
+| `AFFINITY_INTEGRATION.md` | **new** — open notes on driving this from Affinity 3 |
 
 Every other upstream file is unmodified, and the full upstream history is preserved.
 The pretrained weights are **not** redistributed here; download them from the links
