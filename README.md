@@ -12,7 +12,9 @@ This repo contains training and evaluation code for the following paper:
 > [codeslake/IFAN](https://github.com/codeslake/IFAN) as of commit `66bf136`
 > (CVPR 2021, POSTECH). It is not affiliated with, or endorsed by, the original
 > authors. Upstream is licensed **AGPL-3.0** ([`LICENSE`](LICENSE)), and this fork
-> remains under that same licence.
+> remains under that same licence. The additions and modifications listed below are
+> © 2026 Ryan Raz ([RRaz](https://github.com/RRaz)), released under the same
+> AGPL-3.0. `LICENSE` is upstream's file, unmodified.
 
 ## Modifications in this fork
 
@@ -53,10 +55,28 @@ Start with **[`LOCAL_SETUP.md`](LOCAL_SETUP.md)** for setup, usage and verificat
 | `input/README.txt` | **new** — drop-zone instructions |
 | `demo/input/input_large.jpg` | **new** — 20.7 Mpx sample that exercises tiling |
 | `AFFINITY_INTEGRATION.md` | **new** — **add-on, not part of the current work**: open notes on driving this from Affinity 3 |
+| `INTERFACE.md` | **new** — **add-on**: the contract the deblur and depth tools both satisfy, so a handler can drive either without touching its code |
 
 Every other upstream file is unmodified, and the full upstream history is preserved.
 The pretrained weights are **not** redistributed here; download them from the links
 in §3 below, as upstream intends.
+
+### Licence and assets
+
+`LICENSE` (GNU AGPL-3.0) covers the software in this repository — upstream's and the
+additions alike. Two assets need saying separately, because a software licence does not
+settle what an image may be used for:
+
+- `demo/input/input.jpg` is upstream's sample image, kept exactly as upstream ships it.
+- `demo/input/input_large.jpg` is the fork author's own photograph. Its EXIF says so —
+  `Artist: Ryan Raz`, `Copyright: all rights reserved` — and it is included only as a
+  large test sample that exercises tiling. **It is not covered by the AGPL-3.0 grant and
+  is not licensed for reuse.** If you want a sample you can redistribute, use your own
+  file (`demo/input/` is read by the runner like any other folder) or upstream's
+  `input.jpg`.
+
+The weights are not here, so their terms are whatever the publisher you download them
+from attaches — see §3 for the links.
 
 
 <p align="left">

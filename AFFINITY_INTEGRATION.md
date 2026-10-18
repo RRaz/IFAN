@@ -2,6 +2,10 @@
 
 **Status:** add-on, not started, and deliberately not part of the current work · captured 2026-10-18
 
+**The interface it will be written against is now fixed:** [`INTERFACE.md`](INTERFACE.md).
+The deblur tool satisfies it already except for the manifest and `--version`; the depth
+tool is to be brought up to it; the handler comes last and drives both through it.
+
 This is kept separate on purpose. The 16-bit path (`LOCAL_SETUP.md` §5.6) is finished and
 tested on its own first, so that the two are not being debugged at the same time. Nothing
 here blocks anything there, and nothing there needs reading in order to use this runner.
@@ -160,8 +164,13 @@ What is still missing:
 ## Planned future work
 
 **Sequence as of 2026-10-18** — to be taken in order, unless expedience says
-otherwise:
+otherwise. The contract in [`INTERFACE.md`](INTERFACE.md) is settled first, because
+both programs have to satisfy it and the handler has to be written against it:
 
+0. **The contract is written** — [`INTERFACE.md`](INTERFACE.md): invocation, result
+   naming, the shared /8 frame, bit depth, the JSON manifest, failure and exit codes.
+   Two small gaps remain on the deblur side (a `--version` flag and writing the
+   manifest); both change no pixels and are worth closing before step 5.
 1. **Enable an interface.** Turn on the MCP server in Affinity's Settings (3.2 or
    later; Affinity restarts), or take the more general JavaScript scripting route.
    The MCP server is the smaller step and is what makes the interface inspectable, so
@@ -174,14 +183,27 @@ otherwise:
    - **If they do not:** the manual path already works today (export from Affinity →
      run `run_infer.bat` or `local_infer.py` → place the `_db` file as a layer).
      Integration would then only save a few clicks.
-3. **Try the 16-bit version.** The runner side is done — see the bit depth section
-   above. What remains is dropping in `ckpt/IFAN_16bit.pytorch` and trying a genuine
-   16-bit image on it. None of that needs Affinity, so it can run in parallel with
-   steps 1 and 2; see "On the memory concern" below for why it fits.
-4. **Make the depth map program work with Affinity.** The same pattern as step 2, but
-   aimed at the **local** copy of that project rather than the repo — see Related work.
+3. **16-bit: done.** The deblur runner reads a file's own bit depth and writes the same
+   one back with no arguments, per file, in a mixed folder — `LOCAL_SETUP.md` §5.6.
+   `ckpt/IFAN_16bit.pytorch` is in place and the 16-bit path is verified, so there is
+   nothing left to try here. This was the earlier step 3.
+4. **Bring the depth map program up to the same contract.** A `local_depth.py` in the
+   **local** tree of that project (not this repo, and not its GitHub copy), giving it
+   what it lacks today: a command line, folder batches, results beside the originals
+   with its own subfolder and suffix, the same shared /8 frame so its layer and the
+   deblur layer register exactly, 16-bit greyscale by default, and the same manifest.
+   Its working resolution comes from the model and must be **stated, not silent**. A
+   tiled native-resolution pass is a later question — the model returns per-image
+   relative depth, so tiles can disagree in scale and offset, and that needs measuring
+   against seams rather than assuming.
+5. **Then the handler, combining both.** One program, driving the two tools as
+   processes and reading their manifests only — no imports, no parsing console text, no
+   knowledge of which model ran. It imports each result as a layer at native size and
+   leaves blending to the artist, as above. Because it shares no code with either tool,
+   its own licence is free of theirs (see the licence section of `INTERFACE.md`).
 
-Steps 3 and 4 may swap, whichever proves quicker to land.
+Steps 1 and 2 can run in parallel with 4; step 5 needs 0 and 4 settled, and is much
+easier once the manifest exists on both sides.
 
 ### Inspecting the interface (step 1)
 
@@ -230,30 +252,39 @@ are recorded here because they are what the code is defending against:
 ## Related work — the 16-bit depth map project
 
 A second project of mine targets the same audience: **`RRaz/DepthAnythingAC`**, a
-fork of *Depth Anything At Any Condition*. I run it locally through a browser
-interface, and it writes **16-bit greyscale** results to a folder, arranged
-similarly to this repo's `deblurred/` output.
+fork of *Depth Anything At Any Condition*, worked on at
+`H:\pythondepth\DepthAnything-AC`. It runs locally through a browser interface and
+writes the depth map out as **16-bit greyscale**.
 
-**The public repo is not the working copy.** What actually runs is a version
-modified on this machine for personal use, and the GitHub fork may lag behind it.
-Anything described from the repo — including the browser tool at `tools/infer.py` —
-should be checked against the local tree before being relied on.
+Checked 2026-10-18: the working tree and the GitHub fork are **in step** — `main` at
+`3c0b280`, working tree clean, and this is the only copy of the project on the machine.
+So there is no longer a lagging copy to worry about; the local tree is what runs, and it
+is where a batch runner would be added.
 
 Notes:
 
-- **GPU is off by design on the local copy.** As it stands it works only when the
-  GPU is not used; the failure looks like hard-referenced driver versions rather
-  than anything wrong with the model. It has not needed fixing, because the CPU
-  path is *faster* than the cloud version.
+- **The output is a log, not a result.** `app.py` writes `logs/raw_depth_<timestamp>.png`
+  as a side effect of showing a preview, so nothing connects a depth map to the file it
+  came from. That is the first thing `INTERFACE.md` fixes.
+- **The working resolution is the model's.** The short side is scaled to 518 px and the
+  map is interpolated back to the original size, so the result matches the input's
+  dimensions but is not at the input's detail. That has to be stated on the console
+  rather than left to be discovered.
+- **The environment is CPU-only**, which is why GPU is off: `.venv` holds
+  `torch 2.3.0+cpu`, so `torch.cuda.is_available()` is `False` and the app takes the CPU
+  path. At 518 px it is quick enough that this has never needed fixing. The
+  `.venv-xformers` and `.venv-xformers-cu` folders are the abandoned GPU attempts —
+  hard-referenced driver versions, rather than anything wrong with the model.
 - A depth map is single-channel, so 16-bit greyscale is the most it can use — the
   48-bit question above belongs to the colour project, not this one.
-- Both projects produce full-resolution, same-dimension results written beside the
-  source, so one integration pattern could serve both.
-- **Integrate against the local copy**, not the repo. For this project the running
-  code on the machine is the source of truth.
-- GitHub detects **no licence** in `RRaz/DepthAnythingAC`. Worth checking the
-  parent before publishing more there — the same attribution question that applied
-  to this fork, but with even less to go on.
+- **Licence: CC-BY-NC-4.0 — non-commercial.** Checked rather than assumed: the upstream
+  Space declares `cc-by-nc-4.0`, the vendored DINOv2 copy is CC-BY-NC-4.0 for code *and*
+  weights, and the Depth Anything V2 code underneath is Apache-2.0. The fork now carries
+  all of that in `LICENSE.md`, `THIRD_PARTY_NOTICES.md` and `LICENSES/`. This is the
+  reason the Affinity handler is a contract rather than a shared library — see the
+  licence section of `INTERFACE.md`.
+- **Integrate against this tree**, and give it its own `local_depth.py` satisfying
+  `INTERFACE.md` — planned step 4 above.
 
 ## Sources
 
