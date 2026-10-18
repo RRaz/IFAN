@@ -68,6 +68,41 @@ model, handing work off to a command-line tool is awkward.
 Do **not** assume an API such as `api.runProcess` carries over from other
 applications — that call belongs to Cavalry, not Affinity.
 
+## Bit depth — 8-bit today, 48-bit wanted
+
+Second priority, **after** the interface is working: 16 bits per channel (48-bit
+colour), matched to Affinity's 16-bit mode. The findings below make this a much
+smaller job than it sounds.
+
+State of play in `local_infer.py`:
+
+- The pipeline is **float32 throughout** — the network runs on float patches and
+  the tile accumulator is `float32`.
+- **16-bit input already works.** `data_loader/utils.py::read_frame` branches on
+  `norm_val`: when it equals `2**16-1` it reads with `cv2.imread(path, -1)`
+  (`IMREAD_UNCHANGED`, which preserves 16-bit depth) and divides by 65535.
+  `local_infer.py` already passes `config.norm_val` through, so nothing needs
+  changing on the way in.
+- **Only the final write is 8-bit.** One line quantises the result:
+  `output = (np.flip(blended, 2) * 255).astype(np.uint8)`.
+- `--ext` currently offers only `keep`, `png` and `jpg`.
+
+What a 48-bit path needs:
+
+1. Keep the result at 16-bit on write — multiply by 65535 and cast to `uint16`
+   instead of 255 / `uint8`.
+2. Write a container that can hold 16-bit. **JPEG cannot** — it is 8-bit only, so
+   `--ext jpg` can never carry 48-bit. TIFF is the natural interchange for an
+   Affinity layer round trip; 16-bit PNG also works.
+3. Use the **16-bit trained model**, not the 8-bit one: `configs/config_IFAN_16bit.py`
+   (`in_bit = 16`, `norm_val = 65535`, same `N = 17` and `refine_val = 8`) with
+   `ckpt/IFAN_16bit.pytorch`. Feeding 16-bit data to the 8-bit model would be the
+   wrong pairing.
+
+The 16-bit weights are not in this repo — they come from the same upstream download
+as the 8-bit ones ("Our model trained with 16 bit images", Table 1 of the
+supplementary material).
+
 ## Environment check at capture time
 
 - Affinity was not running.
@@ -97,23 +132,28 @@ applications — that call belongs to Cavalry, not Affinity.
 6. **If they do not:** the manual path already works today (export from Affinity →
    run `run_infer.bat` or `local_infer.py` → place the `_db` file as a layer).
    Integration would then only save a few clicks.
+7. Only once the round trip works: move to 48-bit output (see the bit depth section
+   above). Mind the whole chain, not just the tool — if Affinity exports an 8-bit
+   intermediate on the way out, the 16-bit work downstream is wasted, so the export
+   format has to be 16-bit too.
 
-## Related work
+## Related work — the 16-bit depth map project
 
-The same integration would suit a separate **16-bit depth map modification**, to be
-written up when picked up — also aimed at Affinity 3 users.
+A second project of mine targets the same audience: **`RRaz/DepthAnythingAC`**, a
+fork of *Depth Anything At Any Condition*. I run it locally through a browser
+interface, and it writes **16-bit greyscale** results to a folder, arranged
+similarly to this repo's `deblurred/` output. The repo carries a browser tool at
+`tools/infer.py`.
 
-Relevant to that: upstream ships a **16-bit trained variant**, so a 16-bit
-workflow need not round-trip through 8-bit:
+Notes:
 
-```
-python run.py --mode IFAN_16bit --network IFAN --config config_IFAN_16bit \
-  --data DPDD --ckpt_abs_name ckpt/IFAN_16bit.pytorch \
-  --data_offset /data_offset --output_offset ./output
-```
-
-(README, "Our model trained with 16 bit images" — Table 1 of the supplementary
-material.) Its weights are separate from `ckpt/IFAN.pytorch`.
+- A depth map is single-channel, so 16-bit greyscale is the most it can use — the
+  48-bit question above belongs to the colour project, not this one.
+- Both projects produce full-resolution, same-dimension results written beside the
+  source, so one integration pattern could serve both.
+- GitHub detects **no licence** in `RRaz/DepthAnythingAC`. Worth checking the
+  parent before publishing more there — the same attribution question that applied
+  to this fork, but with even less to go on.
 
 ## Sources
 
