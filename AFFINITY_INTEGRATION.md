@@ -13,6 +13,11 @@ the deblurred plate is composited back over the original and a mask decides wher
 it applies, so sky and distant objects keep the softer rendering they should have.
 Uniform deblurring across the frame fights how a photograph is read.
 
+Because the plate is normally blended at partial opacity rather than at 100%, the
+precision of the stack matters more than the precision of the deblur itself — a blend
+scales the layer's contribution down, and an 8-bit layer has little left to give at that
+point. That is what makes 16-bit worth having; see the bit depth section below.
+
 That fixes the shape of any integration: it must return a **layer of the same
 dimensions**, so it drops onto the stack at 100% with exact pixel alignment and no
 resampling. Anything that returns only a flattened file is the wrong shape for the
@@ -105,13 +110,28 @@ What is still missing:
 - **The 16-bit trained model.** `configs/config_IFAN_16bit.py` (`in_bit = 16`,
   `norm_val = 65535`, same `N = 17` and `refine_val = 8`) with
   `ckpt/IFAN_16bit.pytorch`. The two architectures are identical, so the 8-bit
-  checkpoint loads into the 16-bit config and the plumbing can be exercised without
-  it — but the *quality* claim needs weights trained at that precision. They are not
-  in this repo; they come from the same upstream download as the 8-bit ones ("Our
-  model trained with 16 bit images", Table 1 of the supplementary material).
-- **A genuine 16-bit image to try it on.** An 8-bit JPEG re-saved as a 16-bit TIFF
-  exercises the plumbing but proves nothing about quality, since the extra precision
-  was never there to begin with.
+  checkpoint loads into the 16-bit config — that is what has been run so far — but
+  whether the model deblurs *differently* at that precision needs weights trained for
+  it. They are not in this repo; they come from the same upstream download as the 8-bit
+  ones ("Our model trained with 16 bit images", Table 1 of the supplementary material).
+
+  **This turned out to be the smaller half of the question.** 16-bit is not wanted in
+  order to deblur better; it is wanted so that the result survives being blended, since a
+  blend scales the layer's contribution down and the stack is only as deep as its
+  shallowest layer. Measured on a real 20.9-megapixel frame, an 8-bit layer leaves 33
+  levels for the correction at 10% opacity and 94 at 30%, where a 16-bit layer leaves
+  5,706 and 14,932. None of those numbers involve the 16-bit weights, so the part that
+  matters most is already working.
+
+- **A genuine 16-bit image to try it on.** Supplied: `testfolder/IMG_1676_16.tiff`,
+  4578 x 4571, holding **65,477 distinct levels** — not the 256 that an 8-bit picture
+  scaled into a 16-bit container would show, so the export chain is not collapsing to 8
+  bits on the way out. Its 16-bit PNG twin carries the same data to a mean difference of
+  0.000, so the container choice is only about size (105.6 against 104.0 MiB — no
+  meaningful difference). Affinity writes those TIFFs with Adobe Deflate
+  (Compression=8), the same choice `local_infer.py` now makes, so the two are
+  interchangeable as input. Whether the *source* held more than 8 bits of real
+  information is a separate question that only the file's provenance can settle.
 
 ## Environment check at capture time
 

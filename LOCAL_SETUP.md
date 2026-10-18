@@ -295,11 +295,31 @@ Three things have to line up, and all three are checked:
 
 The 16-bit weights are a separate download (§4.2). Without them `--config
 config_IFAN_16bit` still runs, because the architecture is identical and the 8-bit
-checkpoint loads into it — but that only exercises the plumbing, not 16-bit
-deblurring. **16-bit input and output do not by themselves improve a result;** the
-model has to have been trained at that precision too. What the 16-bit path buys you is
-the headroom to take the result into Affinity and combine it as a layer without an
-8-bit round trip quantising it first.
+checkpoint loads into it; with only `IFAN.pytorch` you can still write a 16-bit result,
+which is the 8-bit model's correction carried at full input precision. Whether the
+16-bit-trained model deblurs differently is a separate question — but it is the smaller
+one. **16-bit input and output do not by themselves make the model deblur better;** what
+they buy is the precision to hand the result to a blend, and that is the requirement.
+
+Blending sets that requirement, because a blend scales the layer's contribution down.
+Measured on a real 20.9-megapixel frame, compositing the deblurred result over the
+original and comparing against the same blend computed exactly in floating point:
+
+| layer opacity | levels the correction can still take, 8-bit layer | 16-bit layer |
+| --- | --- | --- |
+| 100% | 295 | 42,015 |
+| 50% | 152 | 22,797 |
+| 30% | 94 | 14,932 |
+| 10% | 33 | 5,706 |
+| 5% | 17 | 3,076 |
+
+At the subtler opacities an artist actually uses, an 8-bit layer has only tens of levels
+left for the thing being blended in, so a smooth correction arrives stepped; a 16-bit
+layer has thousands. The effect is not confined to where the layer bites — at 30% the
+8-bit composite differs from the exact one by 0.32 of a level at the median pixel and
+3.4 at the worst, with 1.9% of pixels moving by more than a level, whereas at 16 bits
+the same comparison is 0.001 of a level. A stack is only as deep as its shallowest
+layer, so one 8-bit layer in the composite quantises all of it.
 
 Bit depth does **not** change GPU memory: the network works in `float32` either way and
 the two configs are architecturally the same, so the ~1.9 GB tiled peak in §6 applies
