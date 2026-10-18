@@ -450,9 +450,10 @@ then OpenCV sees only the TIFF container: the colour matrix, white balance and
 linearisation that make a DNG a DNG are skipped, and the runner says so on the console. A
 camera raw usually arrives as a single-channel colour-filter array rather than a picture,
 which it also warns about. A DNG can be read but not written, so the result needs
-`--ext tif` (or `png`); `--ext keep` is refused. For a correct read `rawpy` (libraw) is
-installed in `.venv`, but for anything going into the deblurring pipeline, export a
-demosaiced TIFF or PNG instead.
+`--ext tif` (or `png`); `--ext keep` is refused. Affinity can read a DNG but cannot write
+one, so a DNG is not available as an interchange format for this workflow in any case.
+For a correct read `rawpy` (libraw) is installed in `.venv`, but for anything going into
+the deblurring pipeline, export a demosaiced TIFF or PNG instead.
 
 **Input is very small**
 Images under 8 px after trimming are rejected, since the network needs at least

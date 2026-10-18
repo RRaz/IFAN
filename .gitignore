@@ -19,3 +19,6 @@ __pycache__/
 # Anchored with a leading slash so it cannot touch demo/input/
 /input/*
 !/input/README.txt
+
+# Scratch folder for test images: large, and not part of the project
+/testfolder/
