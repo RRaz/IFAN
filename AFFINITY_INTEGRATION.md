@@ -5,9 +5,8 @@
 **The interface it will be written against is fixed, and both tools satisfy it:**
 [`INTERFACE.md`](INTERFACE.md). `local_infer.py` (deblur) and `local_depth.py` (depth,
 in that project's tree) both answer `--version`, write a contract-1 manifest and fail per
-file without stopping a batch. What is left is the handler itself — step 5 below — and
-the Affinity-side question under "The open question", which decides how much of it can be
-automatic.
+file without stopping a batch. What is left is the adapter that Affinity calls — step 5
+below — and the pixel filter handshake it has to satisfy, under "The pixel filter route".
 
 This is kept separate on purpose. The 16-bit path (`LOCAL_SETUP.md` §5.6) is finished and
 tested on its own first, so that the two are not being debugged at the same time. Nothing
@@ -36,7 +35,11 @@ job.
 
 ## What is confirmed
 
-**Two interfaces exist.**
+**Three interfaces exist.**
+
+0. **Pixel filter** — an outside program that receives the current pixel layer and
+   returns the replacement for it. Older than the two below, and the one that fits this
+   job; see "The pixel filter route".
 
 1. **JavaScript scripting** (Affinity 3)
    - Disabled by default; enable it in Affinity's Settings.
@@ -68,21 +71,49 @@ job.
 - Inspecting the live tool list:
   `npx @modelcontextprotocol/inspector --sse http://localhost:6767/sse`.
 
-## The open question
+## The pixel filter route
 
-Neither interface has been confirmed able to:
+**Reported 2026-10-20.** Affinity can call an outside program as a **pixel filter**: it
+hands the current pixel layer to that program and takes the image it returns as the
+replacement content of the same layer. It is an older mechanism than JavaScript
+scripting, and it answers both halves of the original question in one step — so the
+export-then-place route, and the uncertainty about whether scripting may touch arbitrary
+paths, both drop out.
 
-- **run an external process** (to invoke `local_infer.py`), or
-- **export the current document to a chosen path**, and **place an imported image
-  back as a layer**.
+If it works as described, the adapter is not a document driver but a **thin program**:
 
-Partial evidence that file access may be restricted: the community markdown
-example notes the file *must be on the Desktop for the file picker to select it*,
-which points at a native file picker rather than arbitrary paths. If that is the
-model, handing work off to a command-line tool is awkward.
+1. Affinity hands it the layer as an image file.
+2. It runs `local_infer.py` (or `local_depth.py`) on that file with `--manifest` and
+   reads the `output` path from the manifest.
+3. It returns that image; Affinity replaces the layer with it. The layer is now
+   deblurred, or has become a depth map, and masking and opacity stay with the artist.
 
-Do **not** assume an API such as `api.runProcess` carries over from other
-applications — that call belongs to Cavalry, not Affinity.
+What goes away: exporting the document, placing a layer, file pickers, the MCP server,
+and the question of whether a script may spawn a process. What replaces it: the returned
+image has to be exactly the layer's size, because the layer is being *replaced* rather
+than fitted into a document.
+
+Three things decide the adapter's shape, and nothing else does:
+
+- **What is passed.** A temporary file? A path in the arguments? Which format, colour
+  profile and alpha? Does the layer arrive flattened, or with its own transparency?
+- **Bit depth.** Does the handshake carry 16 bits per channel? If it is 8-bit, this
+  route loses the precision that makes a partial-opacity blend work (`LOCAL_SETUP.md`
+  §5.6), and the depth map arrives quantised to 8 bits. That is the one finding that
+  would send the work back to the file-based route.
+- **Size.** Must the returned image match the layer exactly? The deblur network crops to
+  a multiple of 8, so its result can be up to 7 px smaller (`INTERFACE.md` §3). The
+  adapter would then extend the missing bottom/right strip by repeating the last row and
+  column — no resampling, no invented detail — rather than let Affinity scale the layer.
+  A depth map needs nothing: it is exactly the input's size.
+
+A **probe** settles all three in one run: a program registered as the filter that writes
+down its argument list, working directory, and everything it can learn about the file it
+was handed — dimensions, bit depth, channels, alpha, profile — then returns that same
+file unchanged, so the layer comes back as it went in.
+
+Do **not** assume an API such as `api.runProcess` carries over from other applications —
+that call belongs to Cavalry, not Affinity.
 
 ## Bit depth — 8-bit today, 48-bit wanted
 
@@ -175,18 +206,17 @@ have to satisfy it and the handler has to be written against it:
    JSON manifest, failure and exit codes. The two gaps that stood here (`--version` and
    the manifest) were closed on the deblur side on 2026-10-19 and on the depth side on
    2026-10-20.
-1. **Enable an interface.** Turn on the MCP server in Affinity's Settings (3.2 or
-   later; Affinity restarts), or take the more general JavaScript scripting route.
-   The MCP server is the smaller step and is what makes the interface inspectable, so
-   it goes first — see "Inspecting the interface" below.
-2. **Make IFAN talk to the interface.** What this involves depends on the answer to
-   "The open question" above:
-   - **If export and place both exist:** no Affinity script is needed. The agent
-     exports the active document, runs `local_infer.py` on it, and places the result
-     back as a layer — landing straight in the mask-and-blend workflow.
-   - **If they do not:** the manual path already works today (export from Affinity →
-     run `run_infer.bat` or `local_infer.py` → place the `_db` file as a layer).
-     Integration would then only save a few clicks.
+1. **Establish the pixel filter handshake.** Register the probe program as a filter, run
+   it on a known 16-bit layer, and read what it recorded. That settles format, bit depth,
+   size and how parameters reach the program — see "The pixel filter route". The MCP
+   server and the JavaScript API remain available and are worth inspecting for other
+   jobs, but the filter route does not depend on them.
+2. **Write the adapter.** One program with two entry points — deblur and depth: take the
+   file Affinity passed, run the tool as a process with `--manifest`, return `output` at
+   the layer's dimensions. If the handshake turns out to be 8-bit only, the file-based
+   route stays the way to get 16-bit results, and the manual path (export → run
+   `run_infer.bat` / `run_depth.bat` → place the `_db` or `_depth` file) remains the
+   fallback.
 3. **16-bit: done.** The deblur runner reads a file's own bit depth and writes the same
    one back with no arguments, per file, in a mixed folder — `LOCAL_SETUP.md` §5.6.
    `ckpt/IFAN_16bit.pytorch` is in place and the 16-bit path is verified, so there is
@@ -201,22 +231,25 @@ have to satisfy it and the handler has to be written against it:
    colour preview (PNG, `Spectral_r`) is written beside each map and named in the
    manifest's optional `color_map`, for the eye only. The model's 518 px working size is
    printed on every file line rather than left to be discovered.
-5. **Then the handler, combining both.** One program, driving the two tools as
+5. **Then the adapter, serving both tools.** One program, driving the two tools as
    processes and reading their manifests only — no imports, no parsing console text, no
-   knowledge of which model ran. It imports each result as a layer at native size and
-   leaves blending to the artist, as above. Because it shares no code with either tool,
-   its own licence is free of theirs (see the licence section of `INTERFACE.md`).
+   knowledge of which model ran. It is registered with Affinity as a pixel filter, so it
+   returns an image and Affinity puts it back in the layer; blending stays with the
+   artist, as above. Because it shares no code with either tool, its own licence is free
+   of theirs (see the licence section of `INTERFACE.md`).
 
-Steps 1 and 2 can run in parallel with 4; step 5 needs 0 and 4 settled, and is much
-easier once the manifest exists on both sides.
+Steps 1 and 2 are the whole of the Affinity work and can be done whenever Affinity is
+open in front of you; step 5 needs 1 and 4 settled.
 
 ### Inspecting the interface (step 1)
 
-- Dump the SDK docs locally (`node extract_docs.js`) and search them for *file*,
-  *path*, *process*, *export* and *place*/*import*.
-- Enumerate the live tool list with MCP Inspector, looking specifically for: export
-  document, place/import image as layer, and any process execution.
-- Register the server with opencode, proxying to stdio if SSE misbehaves.
+- Find the pixel filter command in Affinity 3 and register the probe as a filter; the
+  probe records what it was handed, so the handshake is discovered rather than assumed.
+- If the filter route turns out to have a gap, fall back to inspecting the JavaScript
+  side: dump the SDK docs locally (`node extract_docs.js`) and search them for *file*,
+  *path*, *process*, *export* and *place*/*import*; enumerate the live MCP tool list with
+  MCP Inspector, looking for export, place-as-layer and process execution.
+- Register the MCP server with opencode, proxying to stdio if SSE misbehaves.
 
 ### On the memory concern (step 3)
 
