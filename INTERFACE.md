@@ -46,15 +46,20 @@ not collide:
 
 This is the clause the compositing depends on:
 
-- **A result is never resampled.** It is the same pixels at the same scale as the input,
-  or the tool fails. No tool may scale a result to make a size work.
-- **It is the top-left crop of the input to the largest multiple of 8.** The network
-  downsamples by 8, so both tools crop identically: a 4571×4578 input yields a
-  4568×4576 result. Both tools must do this the same way, so that a deblur layer and a
-  depth layer for the same photo are the *same size as each other* and register exactly.
-- A result is therefore at most 7 px smaller than its input on each axis, never larger.
-- The manifest carries both sizes and the offset (§5). For every input the offset is
-  `[0, 0]`, but it is stated so that the handler never has to assume it.
+- **A result is never resampled to make a size work.** Pixels keep the input's scale and
+  their position in the frame; no tool may scale a result, and none edits the frame.
+- **Deblur: the top-left crop to the largest multiple of 8.** That network downsamples by
+  8, so a 4571×4578 input yields a 4568×4576 result. The crop is at most 7 px per axis
+  and always takes from the bottom and right, so the top-left of the composition is
+  exact.
+- **Depth: no crop at all.** Its network works on a resampled frame of its own (518 px
+  short side, §7) and interpolates the map back to the input's full size, so a depth map
+  is exactly as large as its input — which is what a mask for the document needs.
+- The two therefore differ by at most 7 px per axis for the same photo. Both begin at the
+  input's top-left, both report `[0, 0]`, and a handler places them there; it never
+  resolves the difference by resampling, because nothing here may be resampled.
+- The manifest carries both sizes and the offset (§5), so the handler is told rather
+  than left to assume.
 
 How a tool reports this for a human is its own business; how it reports it to the
 handler is not.
@@ -63,8 +68,9 @@ handler is not.
 
 - **Deblur** follows the input file: 16-bit in gives 16-bit out, 8-bit in gives 8-bit
   out, no arguments, per file, in a mixed folder. The 16-bit container is TIFF or PNG.
-- **Depth** writes 16-bit greyscale by default: depth is a smooth gradient and it is
-  used at partial opacity, which is where 8 bits bands. 8-bit on request only.
+- **Depth** writes 16-bit greyscale, always: depth is a smooth gradient used at partial
+  opacity, which is where 8 bits bands. The 8-bit colour map it writes beside the result
+  is a preview for the eye, not a depth map, and is never the `output`.
 - **Channels:** 3 for a deblur result, 1 for a depth result. An input alpha channel is
   not carried through to a deblur result — the original still has it, and a correction
   layer wants the whole frame. That is a condition of the output, not a warning.
@@ -112,6 +118,9 @@ One JSON object per run, written even when some files failed:
   with the input's own chroma sampling — 4:4:4, 4:2:2 or 4:2:0 as it arrived, and 4:4:4
   from a lossless input — so the container does not quietly throw away colour resolution
   the input had.
+- `color_map` is optional and may be `null`. Depth writes an 8-bit colour preview beside
+  its map and names it here; a handler may ignore it. It is never a substitute for
+  `output`, and the preview carries no information the 16-bit map does not.
 - Console output stays exactly as it is — one line per file, readable — because a human
   reads it. The manifest exists so the handler does not have to.
 
@@ -141,24 +150,26 @@ One JSON object per run, written even when some files failed:
 
 | Clause | `ifan-deblur` | `depthac-depth` |
 |---|---|---|
-| 1 Invocation, `-i`, destination options | **yes** | to be written |
-| 1 `--version` | **yes** | to be written |
-| 2 Naming and re-ingest guards | **yes** | to be written |
-| 3 Shared frame, /8 crop, no resampling | **yes** | to be written |
-| 4 Bit depth following the file | **yes** | 16-bit greyscale, to be written |
-| 5 Manifest | **yes** | to be written |
-| 6 Per-file failure, exit code | **yes** | to be written |
+| 1 Invocation, `-i`, destination options | **yes** | **yes** |
+| 1 `--version` | **yes** | **yes** |
+| 2 Naming and re-ingest guards | **yes** | **yes** |
+| 3 Shared frame, no resampling | **yes** — /8 crop | **yes** — no crop |
+| 4 Bit depth and channels | **yes** — follows the file | **yes** — 16-bit grey, 1 channel |
+| 5 Manifest | **yes** | **yes** — plus `color_map` |
+| 6 Per-file failure, exit code | **yes** | **yes** |
 
-Both of the gaps that stood here are now in `local_infer.py`: `--version`, which needs no
-checkpoint and no image, and the manifest, which is written as the run proceeds — the
-header before the first image, then rewritten with each result as it lands, through a
-temporary file and an atomic replace, so an interrupted run still leaves a record of
-everything it had finished. The manifest has been checked for an ordinary batch, for a
-refusal (a `failed` entry carrying the console's message, exit code 1) and for a re-run
-that skips a tool's own output.
+Both sides of the table are now real, with the gaps of §8 closed: `--version` needs no
+checkpoint and no image, and the manifest is written as the run proceeds — the header
+before the first image, then rewritten with each result as it lands, through a temporary
+file and an atomic replace, so an interrupted run still leaves a record of everything it
+had finished. Each has been checked for an ordinary batch, for a per-file failure (a
+`failed` entry carrying the console's message, exit code 1) and for a re-run that skips
+a tool's own output.
 
-The next step is the depth tool, written against this document rather than against the
-deblur code — that is the point of having a document.
+The two tools work on the same photo at the same time without sharing a line of code:
+`local_infer.py` in the IFAN tree, `local_depth.py` in the depth tree, each with its own
+licence and its own dependencies. The handler is the next piece, and it talks to them
+through this document.
 
 ## The licence reason this is a contract and not a library
 
