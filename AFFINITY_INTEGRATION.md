@@ -1,10 +1,13 @@
 # Driving IFAN from Affinity 3 — open question
 
-**Status:** add-on, not started, and deliberately not part of the current work · captured 2026-10-18
+**Status:** add-on, step 5 only · captured 2026-10-18, updated 2026-10-20
 
-**The interface it will be written against is now fixed:** [`INTERFACE.md`](INTERFACE.md).
-The deblur tool satisfies it already except for the manifest and `--version`; the depth
-tool is to be brought up to it; the handler comes last and drives both through it.
+**The interface it will be written against is fixed, and both tools satisfy it:**
+[`INTERFACE.md`](INTERFACE.md). `local_infer.py` (deblur) and `local_depth.py` (depth,
+in that project's tree) both answer `--version`, write a contract-1 manifest and fail per
+file without stopping a batch. What is left is the handler itself — step 5 below — and
+the Affinity-side question under "The open question", which decides how much of it can be
+automatic.
 
 This is kept separate on purpose. The 16-bit path (`LOCAL_SETUP.md` §5.6) is finished and
 tested on its own first, so that the two are not being debugged at the same time. Nothing
@@ -163,14 +166,15 @@ What is still missing:
 
 ## Planned future work
 
-**Sequence as of 2026-10-18** — to be taken in order, unless expedience says
-otherwise. The contract in [`INTERFACE.md`](INTERFACE.md) is settled first, because
-both programs have to satisfy it and the handler has to be written against it:
+**Sequence as of 2026-10-20** — to be taken in order, unless expedience says otherwise.
+The contract in [`INTERFACE.md`](INTERFACE.md) was settled first, because both programs
+have to satisfy it and the handler has to be written against it:
 
-0. **The contract is written** — [`INTERFACE.md`](INTERFACE.md): invocation, result
-   naming, the shared /8 frame, bit depth, the JSON manifest, failure and exit codes.
-   Two small gaps remain on the deblur side (a `--version` flag and writing the
-   manifest); both change no pixels and are worth closing before step 5.
+0. **The contract is written, and both sides satisfy it** —
+   [`INTERFACE.md`](INTERFACE.md): invocation, result naming, geometry, bit depth, the
+   JSON manifest, failure and exit codes. The two gaps that stood here (`--version` and
+   the manifest) were closed on the deblur side on 2026-10-19 and on the depth side on
+   2026-10-20.
 1. **Enable an interface.** Turn on the MCP server in Affinity's Settings (3.2 or
    later; Affinity restarts), or take the more general JavaScript scripting route.
    The MCP server is the smaller step and is what makes the interface inspectable, so
@@ -187,15 +191,16 @@ both programs have to satisfy it and the handler has to be written against it:
    one back with no arguments, per file, in a mixed folder — `LOCAL_SETUP.md` §5.6.
    `ckpt/IFAN_16bit.pytorch` is in place and the 16-bit path is verified, so there is
    nothing left to try here. This was the earlier step 3.
-4. **Bring the depth map program up to the same contract.** A `local_depth.py` in the
-   **local** tree of that project (not this repo, and not its GitHub copy), giving it
-   what it lacks today: a command line, folder batches, results beside the originals
-   with its own subfolder and suffix, the same shared /8 frame so its layer and the
-   deblur layer register exactly, 16-bit greyscale by default, and the same manifest.
-   Its working resolution comes from the model and must be **stated, not silent**. A
-   tiled native-resolution pass is a later question — the model returns per-image
-   relative depth, so tiles can disagree in scale and offset, and that needs measuring
-   against seams rather than assuming.
+4. **The depth tool now satisfies it — done 2026-10-20.** `local_depth.py` in the depth
+   tree (`H:\pythondepth\DepthAnything-AC`, pushed to `RRaz/DepthAnythingAC`) gives it
+   the command line, folder batches, `depth/` plus `_depth`, 16-bit greyscale TIFF,
+   per-file failures, `--version` and the same manifest. Two differences from the plan
+   as first written: the map is **exactly the input's size** rather than /8 cropped —
+   its network resamples internally and returns the map to the full frame, which is what
+   a mask for the document wants, and `INTERFACE.md` §3 now states it — and an 8-bit
+   colour preview (PNG, `Spectral_r`) is written beside each map and named in the
+   manifest's optional `color_map`, for the eye only. The model's 518 px working size is
+   printed on every file line rather than left to be discovered.
 5. **Then the handler, combining both.** One program, driving the two tools as
    processes and reading their manifests only — no imports, no parsing console text, no
    knowledge of which model ran. It imports each result as a layer at native size and
@@ -253,28 +258,29 @@ are recorded here because they are what the code is defending against:
 
 A second project of mine targets the same audience: **`RRaz/DepthAnythingAC`**, a
 fork of *Depth Anything At Any Condition*, worked on at
-`H:\pythondepth\DepthAnything-AC`. It runs locally through a browser interface and
-writes the depth map out as **16-bit greyscale**.
+`H:\pythondepth\DepthAnything-AC`. It runs locally through a browser interface, and
+since 2026-10-20 through `local_depth.py` as well, and writes the depth map out as
+**16-bit greyscale**.
 
-Checked 2026-10-18: the working tree and the GitHub fork are **in step** — `main` at
-`3c0b280`, working tree clean, and this is the only copy of the project on the machine.
-So there is no longer a lagging copy to worry about; the local tree is what runs, and it
-is where a batch runner would be added.
+Checked 2026-10-18: the working tree and the GitHub fork are **in step** — this is the
+only copy of the project on the machine. The local tree is what runs, and it is where
+the batch runner was added (step 4 above, done).
 
 Notes:
 
-- **The output is a log, not a result.** `app.py` writes `logs/raw_depth_<timestamp>.png`
-  as a side effect of showing a preview, so nothing connects a depth map to the file it
-  came from. That is the first thing `INTERFACE.md` fixes.
+- **The output is now a result, not a log.** `local_depth.py` writes
+  `<name>_depth.tif` beside the source in `depth/`, with `_depth` in the name and a path
+  in the manifest, so a map is always traceable to the file it came from. The browser
+  app still writes `logs/raw_depth_<timestamp>.png` as a side effect of showing a
+  preview, exactly as before.
 - **The working resolution is the model's.** The short side is scaled to 518 px and the
   map is interpolated back to the original size, so the result matches the input's
-  dimensions but is not at the input's detail. That has to be stated on the console
-  rather than left to be discovered.
-- **The environment is CPU-only**, which is why GPU is off: `.venv` holds
-  `torch 2.3.0+cpu`, so `torch.cuda.is_available()` is `False` and the app takes the CPU
-  path. At 518 px it is quick enough that this has never needed fixing. The
-  `.venv-xformers` and `.venv-xformers-cu` folders are the abandoned GPU attempts —
-  hard-referenced driver versions, rather than anything wrong with the model.
+  dimensions exactly but is not at the input's detail. The runner states the working
+  frame on every line rather than leaving it to be discovered.
+- **The project is CPU only**, by its own declaration: there is no CUDA path left in
+  `app.py` or in the runner, no GPU wheel in `requirements.txt`, and the two abandoned
+  GPU environments (`.venv-xformers`, `.venv-xformers-cu`) have been deleted. `.venv`
+  holds `torch 2.3.0+cpu`; a 16.9 Mpx frame takes about 0.74 s at 518 px.
 - A depth map is single-channel, so 16-bit greyscale is the most it can use — the
   48-bit question above belongs to the colour project, not this one.
 - **Licence: CC-BY-NC-4.0 — non-commercial.** Checked rather than assumed: the upstream
@@ -283,8 +289,8 @@ Notes:
   all of that in `LICENSE.md`, `THIRD_PARTY_NOTICES.md` and `LICENSES/`. This is the
   reason the Affinity handler is a contract rather than a shared library — see the
   licence section of `INTERFACE.md`.
-- **Integrate against this tree**, and give it its own `local_depth.py` satisfying
-  `INTERFACE.md` — planned step 4 above.
+- **Integrate against this tree.** `local_depth.py` already satisfies `INTERFACE.md`, so
+  the handler calls it here rather than reimplementing anything.
 
 ## Sources
 
