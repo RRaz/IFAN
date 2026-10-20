@@ -60,7 +60,7 @@ at full resolution on an image like the one above is a pointless task.
 
 **Provenance.** The photographs here are the author's own. The hen was taken with a 1957
 Jupiter 9 85 mm lens; the bazaar is a 1977 Kodak Kodachrome 64 slide, later digitised by
-the author; the hill town is a 1970s toy-camera frame. They appear here as they do in the
+the author; the hill town is a toy camera frame. They appear here as they do in the
 typeset note.
 
 **Licence.** The text of this note is © 2026 Ryan Raz and, like the additions to this
