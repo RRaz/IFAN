@@ -71,6 +71,7 @@ For what it does on real photographs — and where it stops helping — see
 | `AFFINITY_INTEGRATION.md` | **new** — **add-on, not part of the current work**: open notes on driving this from Affinity 3 |
 | `INTERFACE.md` | **new** — **add-on**: the contract the deblur and depth tools both satisfy, so a handler can drive either without touching its code |
 | `NOTES_FOR_PHOTOGRAPHERS.md`, `assets/notes/` | **new** — the author's photographic notes, their figures, and the typeset PDF |
+| `assets/teaser.gif` | **removed** — upstream's comparison animation, replaced by the author's own photographs as the teaser |
 
 Every other upstream file is unmodified, and the full upstream history is preserved.
 The pretrained weights are **not** redistributed here; download them from the links
@@ -100,13 +101,6 @@ because a software licence does not settle what an image may be used for:
 
 The weights are not here, so their terms are whatever the publisher you download them
 from attaches — see §3 for the links.
-
-
-<p align="left">
-  <a href="https://junyonglee.me/projects/IFAN">
-    <img width=85% src="./assets/teaser.gif"/>
-  </a><br>
-</p>
 
 ## Getting Started
 ### Prerequisites
