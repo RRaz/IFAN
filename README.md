@@ -68,19 +68,19 @@ in §3 below, as upstream intends.
 ### Licence and assets
 
 `LICENSE` (GNU AGPL-3.0) covers the software in this repository — upstream's and the
-additions alike. Two assets need saying separately, because a software licence does not
-settle what an image may be used for:
+additions alike — and the prose in these documents. Photographs are licensed separately,
+because a software licence does not settle what an image may be used for:
 
 - `demo/input/input.jpg` is upstream's sample image, kept exactly as upstream ships it.
-- `demo/input/input_large.jpg` is the fork author's own photograph. Its EXIF says so —
-  `Artist: Ryan Raz`, `Copyright: all rights reserved` — and it is included only as a
-  large test sample that exercises tiling. **It is not covered by the AGPL-3.0 grant and
-  is not licensed for reuse.** If you want a sample you can redistribute, use your own
-  file (`demo/input/` is read by the runner like any other folder) or upstream's
-  `input.jpg`.
-- `assets/notes/` holds the figures for `NOTES_FOR_PHOTOGRAPHERS.md`, which are the
-  author's own photographs for the same reason, and are **likewise not covered by the
-  AGPL-3.0 grant and not licensed for reuse**.
+- `demo/input/input_large.jpg` and the figures in `assets/notes/` are the fork author's
+  own photographs. They are © 2026 Ryan Raz and licensed
+  **[CC BY-NC-ND 4.0](https://creativecommons.org/licenses/by-nc-nd/4.0/)**: you may share
+  them unchanged, with credit, for non-commercial purposes, and not as the basis of an
+  altered image you distribute. **They are not covered by the AGPL-3.0 grant.** The EXIF
+  on `input_large.jpg` still reads `Copyright: all rights reserved`, written before this
+  licence was chosen; this notice is the current grant. If you want a sample you can
+  modify and redistribute, use your own file (`demo/input/` is read by the runner like
+  any other folder) or upstream's `input.jpg`.
 
 The weights are not here, so their terms are whatever the publisher you download them
 from attaches — see §3 for the links.

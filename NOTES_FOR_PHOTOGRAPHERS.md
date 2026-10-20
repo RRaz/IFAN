@@ -64,5 +64,7 @@ the author; the hill town is a 1970s toy-camera frame. They appear here as they 
 typeset note.
 
 **Licence.** The text of this note is © 2026 Ryan Raz and, like the additions to this
-repository, under the AGPL-3.0. The photographs are not: **they are not covered by that
-grant and are not licensed for reuse.**
+repository, under the AGPL-3.0. The photographs are not covered by that grant: they are
+© 2026 Ryan Raz and licensed
+**[CC BY-NC-ND 4.0](https://creativecommons.org/licenses/by-nc-nd/4.0/)** — shared
+unchanged, with credit, non-commercially, and not built upon.
