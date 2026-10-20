@@ -208,6 +208,8 @@ a destination is named.
 | `--cpu` | off | Force CPU even when a GPU is present |
 | `--config` | `auto` | `auto` follows each file's bit depth (§5.6); `config_IFAN` forces 8-bit, `config_IFAN_16bit` forces 16-bit |
 | `--ext` | `keep` | Output format: `keep`, `png`, `jpg` or `tif` |
+| `--manifest` | — | Write a JSON record of the run to this path, for a program driving the tool instead of a person reading the console (`INTERFACE.md` §5) |
+| `--version` | — | Print `ifan-deblur 1.0.0` and exit; needs no input path, GPU or checkpoint |
 
 `--tile` and `--overlap` are rounded down to a multiple of 8 (the network
 downsamples by 8), and `--overlap` is capped at half the tile size.
@@ -235,6 +237,13 @@ Whichever you pick:
 - **Existing outputs are overwritten**, so a re-run replaces the previous results —
   it does not skip work that is already done.
 - Outputs are written in BGR via OpenCV, so colours match the input.
+- **A JPEG result keeps the input's own chroma sampling.** `--ext jpg` on a 4:4:4
+  input writes 4:4:4; 4:2:2 and 4:2:0 are preserved, and a lossless input (TIFF, PNG)
+  gets 4:4:4. This costs a little size — about 1.1 MiB instead of 0.8 MiB on a 1920 px
+  frame — and takes back most of the error where it was worst: on that frame 0.4% of
+  pixels now differ from the lossless result by more than 8 levels, against 3.7 % when
+  everything was written 4:2:0, and the mean difference falls from 3.0 to 2.2 levels.
+  If you care about the last levels, write TIFF or PNG (§5.6).
 - Dimensions are trimmed to a multiple of 8 — a **1–7 px** reduction, inherent to
   the network's /8 downsampling. This is not the downscaling described in §2.
 
@@ -500,7 +509,7 @@ for the same image, because both normalise to the same values in [0, 1]. Anythin
 means the read or write scaling is wrong. Including an alpha channel in that test file
 must not change the result by a single byte.
 
-Three things are worth re-checking whenever `local_infer.py` changes:
+Four things are worth re-checking whenever `local_infer.py` changes:
 
 - **The 8-bit path is byte-identical.** Its output is what upstream users already had, so
   it is compared as a file rather than by eye. Run the same 8-bit image through the
@@ -517,6 +526,12 @@ Three things are worth re-checking whenever `local_infer.py` changes:
   about *half the free memory* divided by 56 bytes per pixel. With nothing to read —
   `li.memory_reading = lambda: None` set before `main()` is called — that line must fall
   back to `100 megapixels` and say why, rather than leaving the number unexplained.
+- **The interface contract is honoured.** `local_infer.py --version` must print
+  `ifan-deblur 1.0.0` and exit 0 with no image and no checkpoint present. A run with
+  `--manifest <path>` must leave a record whose `counts` add up to the console's
+  `Done:` line, and whose `results` include a `status` of `skipped`, `failed` or `ok`
+  for every file found — the failed ones carrying the same message that was printed.
+  The exit code must be `0` only when every file was written.
 
 ---
 
@@ -539,6 +554,11 @@ Neither `IFAN.pytorch` nor `IFAN_16bit.pytorch` is present — see §4.2. A
 
 **`Python environment not found`**
 `.venv` is missing or was moved away from the project root — see §4.1.
+
+**`TIFF_Warning: Unknown field with tag 51168`**
+A private tag some Affinity versions write into their exports. OpenCV does not know it,
+ignores it, and reads the picture correctly — the warning is cosmetic. Results do not
+carry it, so it appears once per such input and never on the way out.
 
 **Colours look inverted**
 Outputs are converted from the network's RGB to OpenCV's BGR before writing. If

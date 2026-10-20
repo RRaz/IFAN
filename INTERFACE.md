@@ -108,7 +108,10 @@ One JSON object per run, written even when some files failed:
 - `status` is `ok`, `failed` or `skipped`. A `failed` entry carries the same message the
   console showed in `error`, and `output` is `null`.
 - Sizes are `[width, height]`, in the file's own orientation.
-- `bit_depth` is per channel. `container` is `tiff`, `png` or `jpeg`.
+- `bit_depth` is per channel. `container` is `tiff`, `png` or `jpeg`. A JPEG is written
+  with the input's own chroma sampling — 4:4:4, 4:2:2 or 4:2:0 as it arrived, and 4:4:4
+  from a lossless input — so the container does not quietly throw away colour resolution
+  the input had.
 - Console output stays exactly as it is — one line per file, readable — because a human
   reads it. The manifest exists so the handler does not have to.
 
@@ -139,17 +142,23 @@ One JSON object per run, written even when some files failed:
 | Clause | `ifan-deblur` | `depthac-depth` |
 |---|---|---|
 | 1 Invocation, `-i`, destination options | **yes** | to be written |
-| 1 `--version` | no — needed | to be written |
+| 1 `--version` | **yes** | to be written |
 | 2 Naming and re-ingest guards | **yes** | to be written |
 | 3 Shared frame, /8 crop, no resampling | **yes** | to be written |
 | 4 Bit depth following the file | **yes** | 16-bit greyscale, to be written |
-| 5 Manifest | no — needed | to be written |
+| 5 Manifest | **yes** | to be written |
 | 6 Per-file failure, exit code | **yes** | to be written |
 
-Both gaps on the deblur side are small additions to `local_infer.py` and change no
-pixels: `--version`, and writing the manifest as each result lands. They are worth doing
-before the handler is started, so the handler is written against something that already
-works rather than against a promise.
+Both of the gaps that stood here are now in `local_infer.py`: `--version`, which needs no
+checkpoint and no image, and the manifest, which is written as the run proceeds — the
+header before the first image, then rewritten with each result as it lands, through a
+temporary file and an atomic replace, so an interrupted run still leaves a record of
+everything it had finished. The manifest has been checked for an ordinary batch, for a
+refusal (a `failed` entry carrying the console's message, exit code 1) and for a re-run
+that skips a tool's own output.
+
+The next step is the depth tool, written against this document rather than against the
+deblur code — that is the point of having a document.
 
 ## The licence reason this is a contract and not a library
 

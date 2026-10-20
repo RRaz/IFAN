@@ -39,6 +39,9 @@ than they went in*.
 - **Windows drop-zone runner** (`run_infer.bat`): drop a folder onto it, or put
   images in `input\` and double-click.
 - **No `cog`/Replicate runtime required** — upstream `predict.py` needs it.
+- **Speaks the interface contract** (`INTERFACE.md`): `--version` reports the tool and
+  its version, `--manifest <path>` writes a JSON record of every file — including a
+  `failed` or `skipped` one — so another program can drive it without reading the console.
 
 Start with **[`LOCAL_SETUP.md`](LOCAL_SETUP.md)** for setup, usage and verification.
 

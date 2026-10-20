@@ -33,15 +33,31 @@ treatment for each.  --config forces one mode for a whole run when that is wante
 An alpha channel is not carried through, by design: the original file still has it, and
 what comes back is the whole frame.
 
+A JPEG result keeps the input's own chroma sampling rather than OpenCV's default.  That
+default is 4:2:0, and upstream's predict.py writes its results that way: on an ordinary
+camera JPEG little is lost, but on a near-lossless 4:4:4 export -- an Affinity or
+Lightroom master, say -- it discards colour detail the file already had, and that
+difference measures about as large as half the deblurring itself.  So a 4:2:0 file comes
+back 4:2:0 and a 4:4:4 file comes back 4:4:4, and a lossless input, having no sampling to
+keep, is given 4:4:4 rather than being degraded on the way out.  16-bit TIFF output, which
+is what to use when the result goes back into an editor, is unaffected: TIFF is lossless
+either way.
+
+`--manifest <path>` writes a JSON record of the run, and `--version` prints the tool id and
+version that record carries.  INTERFACE.md is the contract for both; it is what lets a
+second program drive this one without importing it.
+
 No arguments are needed at all.  The options listed by --help exist for tuning
 only; every one of them has a working default.
 """
 
 import argparse
 import ctypes
+import json
 import os
 import sys
 import time
+from datetime import datetime
 
 import cv2
 import numpy as np
@@ -61,6 +77,11 @@ DEFAULT_DEST = 'both'              # 'output', 'subfolder', 'suffix' or 'both'
 DEFAULT_SUBFOLDER = 'deblurred'    # folder created beside the inputs
 DEFAULT_SUFFIX = '_db'             # appended to each output file name
 DEFAULT_CONFIG = 'auto'            # match each file's own bit depth
+# The interface contract this runner satisfies: the number a second program checks before
+# it trusts anything else in a run record, and the tool id and version it looks for.
+CONTRACT = 1
+TOOL_ID = 'ifan-deblur'
+TOOL_VERSION = '1.0.0'
 IMAGE_EXTS = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.webp')
 HERE = os.path.dirname(os.path.abspath(__file__))
 # The network downsamples by this factor, so tile geometry and the output trim are
@@ -95,6 +116,16 @@ SHALLOW_EXTS = ('.jpg', '.jpeg', '.bmp', '.webp')
 # supported identifier.  Its deprecated twin, 32946, writes the same bytes but makes
 # libtiff warn on every write.
 TIFF_DEFLATE = 8
+# OpenCV's JPEG writer defaults to 4:2:0, halving colour resolution, and it only grew the
+# parameter to say otherwise in 4.5.5.  Its own constants are named where they exist and
+# written out where they do not, so an older OpenCV falls back to the old behaviour
+# instead of being handed a parameter it does not know.
+JPEG_SAMPLING = getattr(cv2, 'IMWRITE_JPEG_SAMPLING_FACTOR', None)
+JPEG_SAMPLING_FACTORS = {
+    '444': getattr(cv2, 'IMWRITE_JPEG_SAMPLING_FACTOR_444', 0x111111),
+    '422': getattr(cv2, 'IMWRITE_JPEG_SAMPLING_FACTOR_422', 0x211111),
+    '420': getattr(cv2, 'IMWRITE_JPEG_SAMPLING_FACTOR_420', 0x221111),
+}
 
 
 def find_images(root, recursive):
@@ -530,6 +561,95 @@ def to_output(blended, in_bit):
     return (np.flip(blended, 2) * scale).astype(dtype)   # RGB -> BGR for OpenCV
 
 
+def jpeg_chroma_sampling(path):
+    """Return '444', '422' or '420' for a JPEG, or None for anything else.
+
+    Read from the frame header directly rather than through an image library: it is the
+    number the file was encoded with, and this runner otherwise depends on OpenCV alone.
+    """
+    try:
+        with open(path, 'rb') as handle:
+            data = handle.read(64 * 1024)
+    except OSError:
+        return None
+    if data[:2] != b'\xff\xd8':
+        return None
+    position = 2
+    while position + 12 <= len(data):
+        if data[position] != 0xFF:
+            position += 1
+            continue
+        marker = data[position + 1]
+        if marker == 0x01 or 0xD0 <= marker <= 0xD9:
+            position += 2
+            continue
+        length = int.from_bytes(data[position + 2:position + 4], 'big')
+        if marker in (0xC0, 0xC1, 0xC2, 0xC9, 0xCA, 0xCB):      # the frame headers
+            if data[position + 9] < 3:
+                return '444'                                    # no colour to subsample
+            horizontal, vertical = data[position + 11] >> 4, data[position + 11] & 0x0F
+            return {(1, 1): '444', (2, 1): '422', (2, 2): '420'}.get((horizontal, vertical))
+        position += 2 + length
+    return None
+
+
+def jpeg_write_params(input_path):
+    """Writer options for a JPEG result: keep the input's own chroma sampling.
+
+    Nothing is gained by writing a better 4:4:4 result than the 4:2:0 the file arrived
+    in, and something is lost by writing a worse one, so the result is neither: it
+    matches.  OpenCV older than 4.5.5 cannot be told, and keeps its own 4:2:0 default.
+    """
+    if JPEG_SAMPLING is None:
+        return []
+    return [JPEG_SAMPLING, JPEG_SAMPLING_FACTORS[jpeg_chroma_sampling(input_path) or '444']]
+
+
+def container_name(path):
+    """The container as the interface contract names it, taken from the file name."""
+    extension = os.path.splitext(path)[1].lower().lstrip('.')
+    return {'jpg': 'jpeg', 'jpe': 'jpeg', 'tif': 'tiff'}.get(extension, extension)
+
+
+def now_iso():
+    """Local time with its UTC offset, the form the contract shows."""
+    return datetime.now().astimezone().isoformat(timespec='seconds')
+
+
+def result_entry(path, status, output=None, error=None, original=None, processed=None,
+                 bits=None, seconds=None):
+    """One `results` entry, in the shape INTERFACE.md fixes."""
+    return {
+        'input': os.path.abspath(path),
+        'output': os.path.abspath(output) if output else None,
+        'status': status,
+        'error': error,
+        'input_size': [original[0], original[1]] if original else None,
+        'output_size': [processed[0], processed[1]] if processed else None,
+        'offset': [0, 0] if status == 'ok' else None,
+        'bit_depth': bits,
+        'channels': 3 if status == 'ok' else None,
+        'container': container_name(output) if output else None,
+        'seconds': seconds,
+    }
+
+
+def write_manifest(path, manifest):
+    """Write the run record, replacing any earlier copy in one step.
+
+    Called once as the run starts and again as each file lands, so a run that is
+    interrupted still leaves a record of what it managed to do rather than nothing.
+    """
+    directory = os.path.dirname(os.path.abspath(path))
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    temporary = path + '.part'
+    with open(temporary, 'w', encoding='utf-8') as handle:
+        json.dump(manifest, handle, indent=2)
+        handle.write('\n')
+    os.replace(temporary, path)
+
+
 def process(runner, device, path, output_path, max_side, tile, overlap, max_pixels,
             forced=None):
     """Deblur one image and write it to `output_path`.
@@ -592,12 +712,13 @@ def process(runner, device, path, output_path, max_side, tile, overlap, max_pixe
     # to random.  Adobe Deflate is lossless and gets the same picture into 108 MiB.
     compressed = (config.in_bit == 16
                   and output_path.lower().endswith(('.tif', '.tiff')))
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    params = []
     if compressed:
-        written = cv2.imwrite(output_path, output,
-                              [cv2.IMWRITE_TIFF_COMPRESSION, TIFF_DEFLATE])
-    else:
-        written = cv2.imwrite(output_path, output)
+        params = [cv2.IMWRITE_TIFF_COMPRESSION, TIFF_DEFLATE]
+    elif output_path.lower().endswith(('.jpg', '.jpeg')):
+        params = jpeg_write_params(path)
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    written = cv2.imwrite(output_path, output, params)
     if not written:
         raise RuntimeError('could not write {}'.format(output_path))
 
@@ -648,6 +769,14 @@ def main():
                              'config_IFAN_16bit forces 16-bit')
     parser.add_argument('--ext', default='keep', choices=['keep', 'png', 'jpg', 'tif'],
                         help='output format; "keep" preserves each input extension (default)')
+    parser.add_argument('--manifest', default=None, metavar='PATH',
+                        help='write a JSON record of the run (interface contract %d) to '
+                             'PATH; a second program reads that rather than the console'
+                             % CONTRACT)
+    parser.add_argument('--version', action='version',
+                        version='{} {}'.format(TOOL_ID, TOOL_VERSION),
+                        help='print the tool id and version, "%s %s", and exit'
+                             % (TOOL_ID, TOOL_VERSION))
     args = parser.parse_args()
 
     # Naming --output is shorthand for --dest output.
@@ -684,8 +813,9 @@ def main():
     else:
         limit_note = ' (as asked)'
 
-    print('device     : {}{}'.format(device, '' if device.type == 'cpu' else
-                                     ' ({})'.format(torch.cuda.get_device_name(0))))
+    device_name = '{}{}'.format(device, '' if device.type == 'cpu' else
+                                ' ({})'.format(torch.cuda.get_device_name(0)))
+    print('device     : {}'.format(device_name))
     print('model      : {}'.format(args.config if args.config != DEFAULT_CONFIG else
                                    'auto, each file at its own bit depth'))
     reading = memory_reading()
@@ -698,6 +828,8 @@ def main():
     print('pixel limit: {}{}'.format('none' if not args.max_pixels else
                                      '{:.0f} megapixels'.format(args.max_pixels / 1e6),
                                      limit_note))
+    if args.manifest:
+        print('manifest   : {}'.format(os.path.abspath(args.manifest)))
 
     # Configurations are loaded on demand, one per bit depth actually encountered, so all
     # that can be checked here is that there is a checkpoint to load at all.
@@ -714,26 +846,71 @@ def main():
     in_subfolder = args.dest in ('subfolder', 'both')
     beside = args.dest in ('suffix', 'both')
 
+    # The run record promised by INTERFACE.md.  It carries the options the contract names
+    # and no others: where a result went is the `output` path inside its own entry, so a
+    # handler never has to reconstruct a path from the options it passed.
+    manifest = None
+    if args.manifest:
+        manifest = {
+            'contract': CONTRACT,
+            'tool': {'id': TOOL_ID, 'version': TOOL_VERSION},
+            'started': now_iso(),
+            'finished': None,
+            'device': device_name,
+            'options': {
+                'dest': args.dest,
+                'suffix': args.suffix,
+                'tile': tile,
+                'overlap': overlap,
+                'max_pixels': args.max_pixels,
+                'config': args.config,
+                'ext': args.ext,
+            },
+            'counts': {'found': 0, 'written': 0, 'failed': 0, 'skipped': 0},
+            'results': [],
+        }
+
+    def finish(written=0, failed=0):
+        """Stamp the record as finished and put it on disk, if one was asked for."""
+        if not manifest:
+            return
+        manifest['counts'].update(written=written, failed=failed)
+        manifest['finished'] = now_iso()
+        write_manifest(args.manifest, manifest)
+
     images = find_images(args.input, args.recursive)
     # Never pick up our own earlier results, or a second run would deblur the
     # deblurred copies and the folder would grow on every run.
     skipped = 0
+    skipped_paths = []
     if in_subfolder or beside:
         kept = []
         for path in images:
             if in_subfolder and is_within(path, subfolder):
                 skipped += 1
+                skipped_paths.append(path)
             elif (beside and args.suffix
                   and os.path.splitext(os.path.basename(path))[0].endswith(args.suffix)):
                 skipped += 1
+                skipped_paths.append(path)
             else:
                 kept.append(path)
         images = kept
+
+    if manifest:
+        # Skipped files are listed rather than only counted, so a handler can tell which
+        # ones already had a result without walking the folder itself.
+        manifest['results'].extend(result_entry(path, 'skipped') for path in skipped_paths)
+        manifest['counts'].update(found=len(images) + skipped, skipped=skipped)
+        write_manifest(args.manifest, manifest)
+
     if not images:
         if skipped:
             print('Nothing to do: all {} image(s) under {} are already processed'
                   .format(skipped, args.input))
+            finish()
             return
+        finish()
         sys.exit('No images found under {}'.format(args.input))
 
     # With one mode forced on every file, what the run produces is known up front, so a
@@ -744,7 +921,15 @@ def main():
             output_ext = output_extension(os.path.splitext(path)[1].lower(), args.ext)[0]
             problem = container_error(forced_bits, output_ext)
             if problem:
-                sys.exit('{}: {}'.format(os.path.basename(path), problem))
+                # A forced configuration that cannot be written is a whole-run mistake, so
+                # the run stops -- but the file it stopped on is in the record, with the
+                # reason, rather than leaving a handler to guess from the exit code.
+                message = '{}: {}'.format(os.path.basename(path), problem)
+                if manifest:
+                    manifest['results'].append(result_entry(path, 'failed', error=message))
+                    manifest['counts'].update(found=len(images), failed=1)
+                finish(0, 1)
+                sys.exit(message)
         if forced_bits == 8:
             probe = next((p for p in images
                           if os.path.splitext(p)[1].lower() in DEEP_EXTS
@@ -796,6 +981,10 @@ def main():
         except Exception as ex:
             failed += 1
             print('[{:>3}/{}] FAILED {}: {}'.format(index, len(images), relative, ex))
+            if manifest:
+                manifest['results'].append(result_entry(path, 'failed', error=str(ex)))
+                manifest['counts']['failed'] = failed
+                write_manifest(args.manifest, manifest)
             continue
 
         done += 1
@@ -809,6 +998,13 @@ def main():
               .format(index, len(images), relative, original[0], original[1],
                       processed[0], processed[1], bits, note, tiled, elapsed, peak))
 
+        if manifest:
+            manifest['results'].append(result_entry(
+                path, 'ok', output=output_path, original=original, processed=processed,
+                bits=bits, seconds=round(elapsed, 2)))
+            manifest['counts']['written'] = done
+            write_manifest(args.manifest, manifest)
+
     print('')
     summary = 'Done: {} of {} image(s) in {:.1f}s'.format(done, len(images), total)
     if done:
@@ -816,6 +1012,10 @@ def main():
     if failed:
         summary += ', {} failed'.format(failed)
     print(summary)
+
+    finish(done, failed)
+    # The contract's exit code: 0 only when every requested file was written.
+    sys.exit(0 if failed == 0 else 1)
 
 
 if __name__ == '__main__':
