@@ -42,6 +42,9 @@ than they went in*.
 
 Start with **[`LOCAL_SETUP.md`](LOCAL_SETUP.md)** for setup, usage and verification.
 
+For what it does on real photographs — and where it stops helping — see
+**[`NOTES_FOR_PHOTOGRAPHERS.md`](NOTES_FOR_PHOTOGRAPHERS.md)**.
+
 ### Files changed from upstream
 
 | File | Change |
@@ -56,6 +59,7 @@ Start with **[`LOCAL_SETUP.md`](LOCAL_SETUP.md)** for setup, usage and verificat
 | `demo/input/input_large.jpg` | **new** — 20.7 Mpx sample that exercises tiling |
 | `AFFINITY_INTEGRATION.md` | **new** — **add-on, not part of the current work**: open notes on driving this from Affinity 3 |
 | `INTERFACE.md` | **new** — **add-on**: the contract the deblur and depth tools both satisfy, so a handler can drive either without touching its code |
+| `NOTES_FOR_PHOTOGRAPHERS.md`, `assets/notes/` | **new** — the author's photographic notes, their figures, and the typeset PDF |
 
 Every other upstream file is unmodified, and the full upstream history is preserved.
 The pretrained weights are **not** redistributed here; download them from the links
@@ -74,6 +78,9 @@ settle what an image may be used for:
   is not licensed for reuse.** If you want a sample you can redistribute, use your own
   file (`demo/input/` is read by the runner like any other folder) or upstream's
   `input.jpg`.
+- `assets/notes/` holds the figures for `NOTES_FOR_PHOTOGRAPHERS.md`, which are the
+  author's own photographs for the same reason, and are **likewise not covered by the
+  AGPL-3.0 grant and not licensed for reuse**.
 
 The weights are not here, so their terms are whatever the publisher you download them
 from attaches — see §3 for the links.
