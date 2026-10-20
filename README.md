@@ -16,6 +16,14 @@ This repo contains training and evaluation code for the following paper:
 > © 2026 Ryan Raz ([RRaz](https://github.com/RRaz)), released under the same
 > AGPL-3.0. `LICENSE` is upstream's file, unmodified.
 
+<p align="center">
+  <a href="assets/teasers/chicken-portrait.jpg"><img width="85%" src="assets/teasers/chicken-portrait.jpg" alt="A hen in profile, the whole frame"></a><br>
+  <a href="assets/teasers/chicken-detail.jpg"><img width="85%" src="assets/teasers/chicken-detail.jpg" alt="The same hen's head, close detail"></a>
+</p>
+
+*Photographs: Ryan Raz, [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/) —
+not the AGPL. Click either for full size.*
+
 ## Modifications in this fork
 
 **Modified 2026-10-18.** The network, the training code and the weights are
@@ -84,6 +92,11 @@ because a software licence does not settle what an image may be used for:
   licence was chosen; this notice is the current grant. If you want a sample you can
   modify and redistribute, use your own file (`demo/input/` is read by the runner like
   any other folder) or upstream's `input.jpg`.
+- The two teaser photographs in `assets/teasers/` are the same author's, © 2026 Ryan Raz,
+  and licensed **[CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/)**:
+  share them and adapt them with credit, non-commercially, and say so if you changed
+  them. There is **no No-Derivatives term** on these two, so they may be cropped or
+  annotated for writing about the tool. They are not covered by the AGPL-3.0 grant.
 
 The weights are not here, so their terms are whatever the publisher you download them
 from attaches — see §3 for the links.
